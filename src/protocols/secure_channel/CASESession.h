@@ -30,6 +30,10 @@
 #include <credentials/FabricTable.h>
 #include <credentials/GroupDataProvider.h>
 #include <crypto/CHIPCryptoPAL.h>
+#if CHIP_CRYPTO_PQC
+#include <crypto/CHIPCryptoPALPQC.h>
+#include <crypto/CHIPCryptoPALPQCSession.h>
+#endif
 #include <lib/core/ScopedNodeId.h>
 #include <lib/core/TLV.h>
 #include <lib/support/Base64.h>
@@ -217,6 +221,10 @@ protected:
         const Crypto::P256PublicKey * initiatorEphPubKey         = nullptr;
         const ReliableMessageProtocolConfig * initiatorMrpConfig = nullptr;
         uint8_t initiatorResume1MICBuffer[Crypto::CHIP_CRYPTO_AEAD_MIC_LENGTH_BYTES];
+#if CHIP_CRYPTO_PQC
+        // Hybrid PQC: Kyber-768 initiator public key, encoded after the classical fields.
+        const Crypto::KyberPublicKey * initiatorKyberPubKey = nullptr;
+#endif
     };
 
     struct ParsedSigma1 : Sigma1Param
@@ -227,6 +235,11 @@ protected:
         ByteSpan initiatorEphPubKey;
         bool initiatorSessionParamStructPresent = false;
         SessionParameters initiatorSessionParams;
+#if CHIP_CRYPTO_PQC
+        // Hybrid PQC: optional on the wire so a stock initiator without PQC still parses.
+        ByteSpan initiatorKyberPubKey;
+        bool initiatorKyberPubKeyPresent = false;
+#endif
     };
 
     struct EncodeSigma2Inputs
@@ -239,6 +252,11 @@ protected:
         Platform::ScopedMemoryBuffer<uint8_t> msgR2Encrypted;
         size_t encrypted2Length = 0;
         const ReliableMessageProtocolConfig * responderMrpConfig;
+#if CHIP_CRYPTO_PQC
+        // Hybrid PQC: Kyber-768 ciphertext produced by encapsulating to the initiator's Kyber pubkey.
+        const uint8_t * kyberCiphertext = nullptr;
+        size_t kyberCiphertextLen       = 0;
+#endif
     };
     struct ParsedSigma2
     {
@@ -257,6 +275,10 @@ protected:
         SessionParameters responderSessionParams;
         uint16_t responderSessionId;
         bool responderSessionParamStructPresent = false;
+#if CHIP_CRYPTO_PQC
+        ByteSpan kyberCiphertext;
+        bool kyberCiphertextPresent = false;
+#endif
     };
 
     struct ParsedSigma2TBEData
@@ -267,6 +289,11 @@ protected:
         ByteSpan responderICAC;
         ByteSpan resumptionId;
         Crypto::P256ECDSASignature tbsData2Signature;
+#if CHIP_CRYPTO_PQC
+        Crypto::DilithiumPublicKey dilithiumPubKey;
+        Crypto::DilithiumSignature dilithiumSignature;
+        bool dilithiumPresent = false;
+#endif
     };
 
     struct EncodeSigma2ResumeInputs
@@ -311,6 +338,12 @@ protected:
         MutableByteSpan nocCert;
 
         Crypto::P256ECDSASignature tbsData3Signature;
+#if CHIP_CRYPTO_PQC
+        // Hybrid PQC: ephemeral Dilithium-3 keypair produced in SendSigma3b and serialized into TBE3
+        // so the responder can verify alongside ECDSA.
+        Crypto::DilithiumPublicKey dilithiumPubKey;
+        Crypto::DilithiumSignature dilithiumSignature;
+#endif
     };
 
     struct HandleSigma3Data
@@ -327,6 +360,11 @@ protected:
         ByteSpan fabricRCAC;
 
         Crypto::P256ECDSASignature tbsData3Signature;
+#if CHIP_CRYPTO_PQC
+        Crypto::DilithiumPublicKey dilithiumPubKey;
+        Crypto::DilithiumSignature dilithiumSignature;
+        bool dilithiumPresent = false;
+#endif
 
         FabricId fabricId;
         NodeId initiatorNodeId;
@@ -512,6 +550,13 @@ private:
     CHIP_ERROR SendSigma2Resume();
 
     CHIP_ERROR DeriveSigmaKey(const ByteSpan & salt, const ByteSpan & info, AutoReleaseSessionKey & key) const;
+
+#if CHIP_CRYPTO_PQC
+    // Replace mSharedSecret with SHA-256(ECDH_secret || Kyber_secret) so that all subsequent
+    // session-key derivations are bound to the post-quantum exchange. Called once per handshake
+    // after both ECDH and Kyber shared secrets are available on the local side.
+    CHIP_ERROR MixKyberSharedSecretIntoMainSecret();
+#endif
     CHIP_ERROR ConstructSaltSigma2(const ByteSpan & rand, const Crypto::P256PublicKey & pubkey, const ByteSpan & ipk,
                                    MutableByteSpan & salt);
     CHIP_ERROR ConstructTBSData(const ByteSpan & senderNOC, const ByteSpan & senderICAC, const ByteSpan & senderPubKey,
@@ -563,6 +608,18 @@ private:
     Crypto::P256PublicKey mRemotePubKey;
     Crypto::P256Keypair * mEphemeralKey = nullptr;
     Crypto::P256ECDHDerivedSecret mSharedSecret;
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC state. Initiator owns Kyber keypair and stores ciphertext after decapsulation.
+    // Responder stores the peer's Kyber public key after parsing Sigma1, encapsulates into mKyberCiphertext.
+    Crypto::KyberKeypair mKyberKeypair;
+    Crypto::KyberPublicKey mKyberLocalPubKey;
+    Crypto::KyberPublicKey mKyberRemotePubKey;
+    uint8_t mKyberCiphertext[Crypto::kKyber_Ciphertext_Length];
+    Crypto::KyberSharedSecret mKyberSharedSecret;
+    bool mKyberKeypairInitialized = false;
+    bool mKyberRemotePubKeyValid  = false;
+    bool mKyberSecretReady        = false;
+#endif
     Credentials::ValidationContext mValidContext;
     Credentials::GroupDataProvider * mGroupDataProvider = nullptr;
 

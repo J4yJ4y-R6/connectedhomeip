@@ -46,6 +46,8 @@ endif()
 # C++17 is required for RPC build.
 idf_build_set_property(CXX_COMPILE_OPTIONS "-std=gnu++17;-Os;-DCHIP_HAVE_CONFIG_H" APPEND)
 idf_build_set_property(C_COMPILE_OPTIONS "-Os" APPEND)
+# Enable post-quantum crypto path (Kyber-768 KEM + Dilithium-3 signatures in CASE)
+idf_build_set_property(COMPILE_OPTIONS "-DCHIP_CRYPTO_PQC=1" APPEND)
 # For the C3, project_include.cmake sets -Wno-format, but does not clear various
 # flags that depend on -Wformat
 idf_build_set_property(COMPILE_OPTIONS "-Wno-format-nonliteral;-Wno-format-security" APPEND)

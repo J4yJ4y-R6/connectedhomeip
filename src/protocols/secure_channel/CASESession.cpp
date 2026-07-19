@@ -59,6 +59,12 @@ enum class TBEDataTags : uint8_t
     kSenderICAC   = 2,
     kSignature    = 3,
     kResumptionID = 4,
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC extension: ephemeral Dilithium-3 pubkey + signature carried inside the
+    // encrypted TBE blob alongside the ECDSA signature. Both signatures must verify.
+    kDilithiumPubKey    = 5,
+    kDilithiumSignature = 6,
+#endif
 };
 
 // TBSDataTags works for both sigma-2-tbsdata and sigma-3-tbsdata as they have the same tag numbers for the elements common between
@@ -80,6 +86,10 @@ enum class Sigma1Tags : uint8_t
     kInitiatorSessionParams = 5,
     kResumptionID           = 6,
     kResume1MIC             = 7,
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC extension: Kyber-768 initiator public key (1184 B).
+    kInitiatorKyberPubKey = 100,
+#endif
 };
 
 enum class Sigma2Tags : uint8_t
@@ -89,6 +99,10 @@ enum class Sigma2Tags : uint8_t
     kResponderEphPubKey     = 3,
     kEncrypted2             = 4,
     kResponderSessionParams = 5,
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC extension: Kyber-768 ciphertext from responder's encapsulation (1088 B).
+    kKyberCiphertext = 100,
+#endif
 };
 
 enum class Sigma2ResumeTags : uint8_t
@@ -747,6 +761,15 @@ CHIP_ERROR CASESession::SendSigma1()
     ReturnErrorOnFailure(mEphemeralKey->Initialize(ECPKeyTarget::ECDH));
     encodeSigma1Inputs.initiatorEphPubKey = &mEphemeralKey->Pubkey();
 
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC: generate Kyber-768 keypair and ship its public key in Sigma1.
+    ChipLogProgress(SecureChannel, "[PQC] CASE Sigma1: generating Kyber-768 initiator keypair");
+    ReturnErrorOnFailure(mKyberKeypair.Initialize());
+    mKyberKeypairInitialized = true;
+    ReturnErrorOnFailure(mKyberKeypair.Pubkey(mKyberLocalPubKey));
+    encodeSigma1Inputs.initiatorKyberPubKey = &mKyberLocalPubKey;
+#endif
+
     // Fill in the random value
     ReturnErrorOnFailure(DRBG_get_bytes(mInitiatorRandom, sizeof(mInitiatorRandom)));
     encodeSigma1Inputs.initiatorRandom = ByteSpan(mInitiatorRandom);
@@ -838,6 +861,10 @@ CHIP_ERROR CASESession::EncodeSigma1(System::PacketBufferHandle & msg, EncodeSig
                                             SessionParameters::kEstimatedTLVSize,        // initiatorSessionParams
                                             SessionResumptionStorage::kResumptionIdSize, // resumptionId
                                             CHIP_CRYPTO_AEAD_MIC_LENGTH_BYTES            // initiatorResumeMIC
+#if CHIP_CRYPTO_PQC
+                                            ,
+                                            Crypto::kKyber_PublicKey_Length              // initiatorKyberPubKey
+#endif
     );
 
     msg = System::PacketBufferHandle::New(dataLen);
@@ -877,6 +904,15 @@ CHIP_ERROR CASESession::EncodeSigma1(System::PacketBufferHandle & msg, EncodeSig
             ReturnErrorOnFailure(tlvWriter.Put(AsTlvContextTag(Sigma1Tags::kResume1MIC), input.initiatorResumeMIC));
         }
     }
+
+#if CHIP_CRYPTO_PQC
+    if (input.initiatorKyberPubKey != nullptr)
+    {
+        ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(Sigma1Tags::kInitiatorKyberPubKey),
+                                                input.initiatorKyberPubKey->ConstBytes(),
+                                                static_cast<uint32_t>(input.initiatorKyberPubKey->Length())));
+    }
+#endif
 
     ReturnErrorOnFailure(tlvWriter.EndContainer(outerContainerType));
     ReturnErrorOnFailure(tlvWriter.Finalize(&msg));
@@ -1068,6 +1104,23 @@ CASESession::NextStep CASESession::HandleSigma1(System::PacketBufferHandle && ms
     //  mRemotePubKey.Length() == initiatorPubKey.size() == kP256_PublicKey_Length.
     memcpy(mRemotePubKey.Bytes(), parsedSigma1.initiatorEphPubKey.data(), mRemotePubKey.Length());
 
+#if CHIP_CRYPTO_PQC
+    if (parsedSigma1.initiatorKyberPubKeyPresent)
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma1: peer (initiator) Kyber-768 pubkey received (%u bytes)",
+                        static_cast<unsigned>(parsedSigma1.initiatorKyberPubKey.size()));
+        ReturnErrorVariantOnFailure(NextStep,
+                                    mKyberRemotePubKey.SetBytes(parsedSigma1.initiatorKyberPubKey.data(),
+                                                                 parsedSigma1.initiatorKyberPubKey.size()));
+        mKyberRemotePubKeyValid = true;
+    }
+    else
+    {
+        ChipLogProgress(SecureChannel,
+                        "[PQC] CASE Sigma1: peer did not advertise Kyber-768 pubkey; running classical-only handshake");
+    }
+#endif
+
     CHIP_ERROR err = CHIP_NO_ERROR;
 
     // Attempt to match the initiator's desired destination based on local fabric table.
@@ -1197,6 +1250,19 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
     // Generate a Shared Secret
     ReturnErrorOnFailure(mEphemeralKey->ECDH_derive_secret(mRemotePubKey, mSharedSecret));
 
+#if CHIP_CRYPTO_PQC
+    if (mKyberRemotePubKeyValid)
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma2: encapsulating to initiator's Kyber-768 pubkey");
+        ReturnErrorOnFailure(mKyberKeypair.Encapsulate(mKyberRemotePubKey, mKyberCiphertext, sizeof(mKyberCiphertext),
+                                                       mKyberSharedSecret));
+        mKyberSecretReady               = true;
+        outSigma2Data.kyberCiphertext    = mKyberCiphertext;
+        outSigma2Data.kyberCiphertextLen = sizeof(mKyberCiphertext);
+        ReturnErrorOnFailure(MixKyberSharedSecretIntoMainSecret());
+    }
+#endif
+
     uint8_t msgSalt[kIPKSize + kSigmaParamRandomNumberSize + kP256_PublicKey_Length + kSHA256_Hash_Length];
 
     MutableByteSpan saltSpan(msgSalt);
@@ -1208,6 +1274,12 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
 
     // Construct Sigma2 TBS Data
     P256ECDSASignature tbsData2Signature;
+#if CHIP_CRYPTO_PQC
+    Crypto::DilithiumKeypair responderDilithiumKp;
+    Crypto::DilithiumPublicKey responderDilithiumPubKey;
+    Crypto::DilithiumSignature responderDilithiumSig;
+    bool responderDilithiumReady = false;
+#endif
     {
         size_t msgR2SignedLen = EstimateStructOverhead(kMaxCHIPCertLength,     // responderNoc
                                                        kMaxCHIPCertLength,     // responderICAC
@@ -1224,12 +1296,27 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
 
         // Generate a Signature
         ReturnErrorOnFailure(mFabricsTable->SignWithOpKeypair(mFabricIndex, msgR2SignedSpan, tbsData2Signature));
+
+#if CHIP_CRYPTO_PQC
+        // Generate the ephemeral Dilithium-3 keypair and sign the same TBS data. The pubkey and
+        // signature are serialized into TBE2 below so the initiator can verify them peer-to-peer.
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma2: signing TBSData2 with ephemeral Dilithium-3");
+        ReturnErrorOnFailure(responderDilithiumKp.Initialize());
+        ReturnErrorOnFailure(responderDilithiumKp.Sign(msgR2SignedSpan.data(), msgR2SignedSpan.size(), responderDilithiumSig));
+        ReturnErrorOnFailure(responderDilithiumKp.Pubkey(responderDilithiumPubKey));
+        responderDilithiumReady = true;
+#endif
     }
     // Construct Sigma2 TBE Data
-    size_t msgR2SignedEncLen = EstimateStructOverhead(nocCert.size(),                             // responderNoc
-                                                      icaCert.size(),                             // responderICAC
-                                                      tbsData2Signature.Length(),                 // signature
-                                                      SessionResumptionStorage::kResumptionIdSize // resumptionID
+    size_t msgR2SignedEncLen = EstimateStructOverhead(nocCert.size(),                              // responderNoc
+                                                      icaCert.size(),                              // responderICAC
+                                                      tbsData2Signature.Length(),                  // signature
+                                                      SessionResumptionStorage::kResumptionIdSize  // resumptionID
+#if CHIP_CRYPTO_PQC
+                                                      ,
+                                                      Crypto::kDilithium_PublicKey_Length,         // dilithiumPubKey
+                                                      Crypto::kDilithium_Signature_Length          // dilithiumSignature
+#endif
     );
 
     VerifyOrReturnError(outSigma2Data.msgR2Encrypted.Alloc(msgR2SignedEncLen + CHIP_CRYPTO_AEAD_MIC_LENGTH_BYTES),
@@ -1269,6 +1356,18 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
     ReturnErrorOnFailure(DRBG_get_bytes(mNewResumptionId.data(), mNewResumptionId.size()));
     ReturnErrorOnFailure(tlvWriter.Put(AsTlvContextTag(TBEDataTags::kResumptionID), mNewResumptionId));
 
+#if CHIP_CRYPTO_PQC
+    if (responderDilithiumReady)
+    {
+        ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kDilithiumPubKey),
+                                                responderDilithiumPubKey.ConstBytes(),
+                                                static_cast<uint32_t>(responderDilithiumPubKey.Length())));
+        ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kDilithiumSignature),
+                                                responderDilithiumSig.ConstBytes(),
+                                                static_cast<uint32_t>(responderDilithiumSig.Length())));
+    }
+#endif
+
     ReturnErrorOnFailure(tlvWriter.EndContainer(outerContainerType));
     ReturnErrorOnFailure(tlvWriter.Finalize());
     msgR2SignedEncLen              = static_cast<size_t>(tlvWriter.GetLengthWritten());
@@ -1297,6 +1396,10 @@ CHIP_ERROR CASESession::EncodeSigma2(System::PacketBufferHandle & msgR2, EncodeS
                                             kP256_PublicKey_Length,              // responderEphPubKey
                                             input.encrypted2Length,              // encrypted2
                                             SessionParameters::kEstimatedTLVSize // responderSessionParams
+#if CHIP_CRYPTO_PQC
+                                            ,
+                                            Crypto::kKyber_Ciphertext_Length     // kyberCiphertext
+#endif
     );
 
     msgR2 = System::PacketBufferHandle::New(dataLen);
@@ -1324,6 +1427,14 @@ CHIP_ERROR CASESession::EncodeSigma2(System::PacketBufferHandle & msgR2, EncodeS
 
     ReturnErrorOnFailure(
         EncodeSessionParameters(AsTlvContextTag(Sigma2Tags::kResponderSessionParams), *input.responderMrpConfig, tlvWriterMsg2));
+
+#if CHIP_CRYPTO_PQC
+    if (input.kyberCiphertext != nullptr && input.kyberCiphertextLen > 0)
+    {
+        ReturnErrorOnFailure(tlvWriterMsg2.PutBytes(AsTlvContextTag(Sigma2Tags::kKyberCiphertext), input.kyberCiphertext,
+                                                    static_cast<uint32_t>(input.kyberCiphertextLen)));
+    }
+#endif
 
     ReturnErrorOnFailure(tlvWriterMsg2.EndContainer(outerContainerType));
     ReturnErrorOnFailure(tlvWriterMsg2.Finalize(&msgR2));
@@ -1495,6 +1606,22 @@ CHIP_ERROR CASESession::HandleSigma2(System::PacketBufferHandle && msg)
     // Generate a Shared Secret
     ReturnErrorOnFailure(mEphemeralKey->ECDH_derive_secret(mRemotePubKey, mSharedSecret));
 
+#if CHIP_CRYPTO_PQC
+    if (parsedSigma2.kyberCiphertextPresent && mKyberKeypairInitialized)
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma2: decapsulating Kyber-768 ciphertext from responder");
+        ReturnErrorOnFailure(mKyberKeypair.Decapsulate(parsedSigma2.kyberCiphertext.data(), parsedSigma2.kyberCiphertext.size(),
+                                                       mKyberSharedSecret));
+        mKyberSecretReady = true;
+        ReturnErrorOnFailure(MixKyberSharedSecretIntoMainSecret());
+    }
+    else
+    {
+        ChipLogProgress(SecureChannel,
+                        "[PQC] CASE Sigma2: no Kyber-768 ciphertext from peer; staying on classical-only secret");
+    }
+#endif
+
     // Generate the S2K key
     AutoReleaseSessionKey sr2k(*mSessionManager->GetSessionKeystore());
     {
@@ -1556,6 +1683,20 @@ CHIP_ERROR CASESession::HandleSigma2(System::PacketBufferHandle && msg)
     ReturnErrorOnFailure(responderPublicKey.ECDSA_validate_msg_signature(msgR2SignedSpan.data(), msgR2SignedSpan.size(),
                                                                          parsedSigma2TBEData.tbsData2Signature));
 
+#if CHIP_CRYPTO_PQC
+    if (parsedSigma2TBEData.dilithiumPresent)
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma2: verifying responder's Dilithium-3 signature over TBSData2");
+        Crypto::DilithiumKeypair verifier;
+        ReturnErrorOnFailure(verifier.Verify(parsedSigma2TBEData.dilithiumPubKey, msgR2SignedSpan.data(),
+                                             msgR2SignedSpan.size(), parsedSigma2TBEData.dilithiumSignature));
+    }
+    else
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma2: responder did not advertise Dilithium-3 signature");
+    }
+#endif
+
     ChipLogDetail(SecureChannel, "Peer " ChipLogFormatScopedNodeId " assigned session ID %d", ChipLogValueScopedNodeId(GetPeer()),
                   parsedSigma2.responderSessionId);
     SetPeerSessionId(parsedSigma2.responderSessionId);
@@ -1603,7 +1744,12 @@ CHIP_ERROR CASESession::ParseSigma2(ContiguousBufferTLVReader & tlvReader, Parse
                                                          kMaxCHIPCertLength,                          // responderICAC
                                                          kMax_ECDSA_Signature_Length,                 // signature
                                                          SessionResumptionStorage::kResumptionIdSize, // resumptionID
-                                                         kCaseOverheadForFutureTBEData // extra bytes for future-proofing
+                                                         kCaseOverheadForFutureTBEData                // extra bytes for future-proofing
+#if CHIP_CRYPTO_PQC
+                                                         ,
+                                                         Crypto::kDilithium_PublicKey_Length,         // dilithiumPubKey
+                                                         Crypto::kDilithium_Signature_Length          // dilithiumSignature
+#endif
     );
 
     size_t msgR2EncryptedLenWithTag = tlvReader.GetLength();
@@ -1629,6 +1775,17 @@ CHIP_ERROR CASESession::ParseSigma2(ContiguousBufferTLVReader & tlvReader, Parse
 
         err = tlvReader.Next();
     }
+
+#if CHIP_CRYPTO_PQC
+    if (err == CHIP_NO_ERROR && tlvReader.GetTag() == AsTlvContextTag(Sigma2Tags::kKyberCiphertext))
+    {
+        ReturnErrorOnFailure(tlvReader.GetByteView(outParsedSigma2.kyberCiphertext));
+        VerifyOrReturnError(outParsedSigma2.kyberCiphertext.size() == Crypto::kKyber_Ciphertext_Length,
+                            CHIP_ERROR_INVALID_CASE_PARAMETER);
+        outParsedSigma2.kyberCiphertextPresent = true;
+        err                                    = tlvReader.Next();
+    }
+#endif
 
     // Future-proofing: CHIP_NO_ERROR will be returned by Next() if we have additional non-parsed TLV Elements, which could
     // happen in the future if additional elements are added to the specification.
@@ -1676,6 +1833,31 @@ CHIP_ERROR CASESession::ParseSigma2TBEData(ContiguousBufferTLVReader & decrypted
     ReturnErrorOnFailure(decryptedDataTlvReader.GetByteView(outParsedSigma2TBE.resumptionId));
     VerifyOrReturnError(outParsedSigma2TBE.resumptionId.size() == SessionResumptionStorage::kResumptionIdSize,
                         CHIP_ERROR_INVALID_CASE_PARAMETER);
+
+#if CHIP_CRYPTO_PQC
+    // Optional Dilithium-3 pubkey + signature, written by the PQC responder.
+    CHIP_ERROR nextErr = decryptedDataTlvReader.Next();
+    if (nextErr == CHIP_NO_ERROR && decryptedDataTlvReader.GetTag() == AsTlvContextTag(TBEDataTags::kDilithiumPubKey))
+    {
+        ByteSpan pubKeySpan;
+        ReturnErrorOnFailure(decryptedDataTlvReader.GetByteView(pubKeySpan));
+        VerifyOrReturnError(pubKeySpan.size() == Crypto::kDilithium_PublicKey_Length, CHIP_ERROR_INVALID_CASE_PARAMETER);
+        ReturnErrorOnFailure(outParsedSigma2TBE.dilithiumPubKey.SetBytes(pubKeySpan.data(), pubKeySpan.size()));
+
+        ReturnErrorOnFailure(decryptedDataTlvReader.Next(AsTlvContextTag(TBEDataTags::kDilithiumSignature)));
+        ByteSpan sigSpan;
+        ReturnErrorOnFailure(decryptedDataTlvReader.GetByteView(sigSpan));
+        VerifyOrReturnError(sigSpan.size() == Crypto::kDilithium_Signature_Length, CHIP_ERROR_INVALID_CASE_PARAMETER);
+        ReturnErrorOnFailure(outParsedSigma2TBE.dilithiumSignature.SetLength(sigSpan.size()));
+        memcpy(outParsedSigma2TBE.dilithiumSignature.Bytes(), sigSpan.data(), sigSpan.size());
+
+        outParsedSigma2TBE.dilithiumPresent = true;
+    }
+    else if (nextErr != CHIP_END_OF_TLV && nextErr != CHIP_NO_ERROR)
+    {
+        return nextErr;
+    }
+#endif
 
     // Exit Container will fail (return CHIP_END_OF_TLV) if the received encoded message is not properly terminated with an
     // EndOfContainer TLV Element.
@@ -1779,11 +1961,28 @@ CHIP_ERROR CASESession::SendSigma3b(SendSigma3Data & data, bool & cancel)
         ReturnErrorOnFailure(data.fabricTable->SignWithOpKeypair(data.fabricIndex, data.msgR3SignedSpan, data.tbsData3Signature));
     }
 
+#if CHIP_CRYPTO_PQC
+    // Sign TBSData3 with an ephemeral Dilithium-3 keypair; pubkey + signature are serialized into
+    // TBE3 below so the responder can verify peer-to-peer alongside ECDSA.
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma3: signing TBSData3 with ephemeral Dilithium-3");
+        Crypto::DilithiumKeypair dilithiumKp;
+        ReturnErrorOnFailure(dilithiumKp.Initialize());
+        ReturnErrorOnFailure(dilithiumKp.Sign(data.msgR3SignedSpan.data(), data.msgR3SignedSpan.size(), data.dilithiumSignature));
+        ReturnErrorOnFailure(dilithiumKp.Pubkey(data.dilithiumPubKey));
+    }
+#endif
+
     CHIP_FAULT_INJECT(FaultInjection::kFault_CASECorruptSigma3Signature, *data.tbsData3Signature.Bytes() ^= 0xFF);
 
     // Prepare Sigma3 TBE Data Blob
     data.msg_r3_encrypted_len =
-        TLV::EstimateStructOverhead(data.nocCert.size(), data.icaCert.size(), data.tbsData3Signature.Length());
+        TLV::EstimateStructOverhead(data.nocCert.size(), data.icaCert.size(), data.tbsData3Signature.Length()
+#if CHIP_CRYPTO_PQC
+                                    ,
+                                    Crypto::kDilithium_PublicKey_Length, Crypto::kDilithium_Signature_Length
+#endif
+                                    );
 
     VerifyOrReturnError(data.msg_R3_Encrypted.Alloc(data.msg_r3_encrypted_len + CHIP_CRYPTO_AEAD_MIC_LENGTH_BYTES),
                         CHIP_ERROR_NO_MEMORY);
@@ -1811,6 +2010,14 @@ CHIP_ERROR CASESession::SendSigma3b(SendSigma3Data & data, bool & cancel)
 
         ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kSignature), data.tbsData3Signature.ConstBytes(),
                                                 static_cast<uint32_t>(data.tbsData3Signature.Length())));
+#if CHIP_CRYPTO_PQC
+        ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kDilithiumPubKey),
+                                                data.dilithiumPubKey.ConstBytes(),
+                                                static_cast<uint32_t>(data.dilithiumPubKey.Length())));
+        ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kDilithiumSignature),
+                                                data.dilithiumSignature.ConstBytes(),
+                                                static_cast<uint32_t>(data.dilithiumSignature.Length())));
+#endif
         ReturnErrorOnFailure(tlvWriter.EndContainer(outerContainerType));
         ReturnErrorOnFailure(tlvWriter.Finalize());
         data.msg_r3_encrypted_len = static_cast<size_t>(tlvWriter.GetLengthWritten());
@@ -2036,10 +2243,15 @@ CHIP_ERROR CASESession::ParseSigma3(ContiguousBufferTLVReader & tlvReader,
     // Fetch encrypted data
     ReturnErrorOnFailure(tlvReader.Next(AsTlvContextTag(Sigma3Tags::kEncrypted3)));
 
-    size_t maxMsgR3SignedEncLen = EstimateStructOverhead(kMaxCHIPCertLength,           // initiatorNOC
-                                                         kMaxCHIPCertLength,           // initiatorICAC
-                                                         kMax_ECDSA_Signature_Length,  // signature
-                                                         kCaseOverheadForFutureTBEData // extra bytes for future-proofing
+    size_t maxMsgR3SignedEncLen = EstimateStructOverhead(kMaxCHIPCertLength,                  // initiatorNOC
+                                                         kMaxCHIPCertLength,                  // initiatorICAC
+                                                         kMax_ECDSA_Signature_Length,         // signature
+                                                         kCaseOverheadForFutureTBEData        // extra bytes for future-proofing
+#if CHIP_CRYPTO_PQC
+                                                         ,
+                                                         Crypto::kDilithium_PublicKey_Length, // dilithiumPubKey
+                                                         Crypto::kDilithium_Signature_Length  // dilithiumSignature
+#endif
     );
 
     size_t msgR3EncryptedLenWithTag = tlvReader.GetLength();
@@ -2087,6 +2299,31 @@ CHIP_ERROR CASESession::ParseSigma3TBEData(ContiguousBufferTLVReader & decrypted
     ReturnErrorOnFailure(decryptedDataTlvReader.GetBytes(outHandleSigma3TBEData.tbsData3Signature.Bytes(),
                                                          outHandleSigma3TBEData.tbsData3Signature.Length()));
 
+#if CHIP_CRYPTO_PQC
+    // Optional Dilithium-3 pubkey + signature, written by the PQC initiator.
+    CHIP_ERROR nextErr = decryptedDataTlvReader.Next();
+    if (nextErr == CHIP_NO_ERROR && decryptedDataTlvReader.GetTag() == AsTlvContextTag(TBEDataTags::kDilithiumPubKey))
+    {
+        ByteSpan pubKeySpan;
+        ReturnErrorOnFailure(decryptedDataTlvReader.GetByteView(pubKeySpan));
+        VerifyOrReturnError(pubKeySpan.size() == Crypto::kDilithium_PublicKey_Length, CHIP_ERROR_INVALID_CASE_PARAMETER);
+        ReturnErrorOnFailure(outHandleSigma3TBEData.dilithiumPubKey.SetBytes(pubKeySpan.data(), pubKeySpan.size()));
+
+        ReturnErrorOnFailure(decryptedDataTlvReader.Next(AsTlvContextTag(TBEDataTags::kDilithiumSignature)));
+        ByteSpan sigSpan;
+        ReturnErrorOnFailure(decryptedDataTlvReader.GetByteView(sigSpan));
+        VerifyOrReturnError(sigSpan.size() == Crypto::kDilithium_Signature_Length, CHIP_ERROR_INVALID_CASE_PARAMETER);
+        ReturnErrorOnFailure(outHandleSigma3TBEData.dilithiumSignature.SetLength(sigSpan.size()));
+        memcpy(outHandleSigma3TBEData.dilithiumSignature.Bytes(), sigSpan.data(), sigSpan.size());
+
+        outHandleSigma3TBEData.dilithiumPresent = true;
+    }
+    else if (nextErr != CHIP_END_OF_TLV && nextErr != CHIP_NO_ERROR)
+    {
+        return nextErr;
+    }
+#endif
+
     ReturnErrorOnFailure(decryptedDataTlvReader.ExitContainer(containerType));
 
     return CHIP_NO_ERROR;
@@ -2107,6 +2344,20 @@ CHIP_ERROR CASESession::HandleSigma3b(HandleSigma3Data & data, bool & cancel)
     // Step 7 - Validate Signature
     ReturnErrorOnFailure(initiatorPublicKey.ECDSA_validate_msg_signature(data.msgR3SignedSpan.data(), data.msgR3SignedSpan.size(),
                                                                          data.tbsData3Signature));
+
+#if CHIP_CRYPTO_PQC
+    if (data.dilithiumPresent)
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma3: verifying initiator's Dilithium-3 signature over TBSData3");
+        Crypto::DilithiumKeypair verifier;
+        ReturnErrorOnFailure(verifier.Verify(data.dilithiumPubKey, data.msgR3SignedSpan.data(), data.msgR3SignedSpan.size(),
+                                             data.dilithiumSignature));
+    }
+    else
+    {
+        ChipLogProgress(SecureChannel, "[PQC] CASE Sigma3: initiator did not advertise Dilithium-3 signature");
+    }
+#endif
 
     return CHIP_NO_ERROR;
 }
@@ -2165,6 +2416,31 @@ CHIP_ERROR CASESession::DeriveSigmaKey(const ByteSpan & salt, const ByteSpan & i
 {
     return mSessionManager->GetSessionKeystore()->DeriveKey(mSharedSecret, salt, info, key.KeyHandle());
 }
+
+#if CHIP_CRYPTO_PQC
+CHIP_ERROR CASESession::MixKyberSharedSecretIntoMainSecret()
+{
+    // The session-key derivation step uses mSharedSecret (a P256ECDHDerivedSecret of 32 B).
+    // Bind the PQC exchange to every downstream HKDF by replacing it with SHA-256(ECDH || Kyber).
+    VerifyOrReturnError(mKyberSecretReady, CHIP_ERROR_INCORRECT_STATE);
+
+    Crypto::Hash_SHA256_stream hash;
+    ReturnErrorOnFailure(hash.Begin());
+    ReturnErrorOnFailure(hash.AddData(ByteSpan(mSharedSecret.ConstBytes(), mSharedSecret.Length())));
+    ReturnErrorOnFailure(hash.AddData(ByteSpan(mKyberSharedSecret.ConstBytes(), mKyberSharedSecret.Length())));
+
+    uint8_t mixed[Crypto::kSHA256_Hash_Length];
+    MutableByteSpan mixedSpan(mixed);
+    ReturnErrorOnFailure(hash.Finish(mixedSpan));
+
+    static_assert(sizeof(mixed) == 32, "P256ECDHDerivedSecret is 32 bytes; SHA-256 output is 32 bytes");
+    ReturnErrorOnFailure(mSharedSecret.SetLength(sizeof(mixed)));
+    memcpy(mSharedSecret.Bytes(), mixed, sizeof(mixed));
+
+    ChipLogProgress(SecureChannel, "[PQC] CASE: mixed Kyber-768 shared secret into session-key input material");
+    return CHIP_NO_ERROR;
+}
+#endif
 
 CHIP_ERROR CASESession::ConstructSaltSigma2(const ByteSpan & rand, const Crypto::P256PublicKey & pubkey, const ByteSpan & ipk,
                                             MutableByteSpan & salt)
@@ -2422,6 +2698,17 @@ CHIP_ERROR CASESession::ParseSigma1(TLV::ContiguousBufferTLVReader & tlvReader, 
                             CHIP_ERROR_INVALID_CASE_PARAMETER);
         err = tlvReader.Next();
     }
+
+#if CHIP_CRYPTO_PQC
+    if (err == CHIP_NO_ERROR && tlvReader.GetTag() == AsTlvContextTag(Sigma1Tags::kInitiatorKyberPubKey))
+    {
+        ReturnErrorOnFailure(tlvReader.GetByteView(outParsedSigma1.initiatorKyberPubKey));
+        VerifyOrReturnError(outParsedSigma1.initiatorKyberPubKey.size() == Crypto::kKyber_PublicKey_Length,
+                            CHIP_ERROR_INVALID_CASE_PARAMETER);
+        outParsedSigma1.initiatorKyberPubKeyPresent = true;
+        err                                         = tlvReader.Next();
+    }
+#endif
 
     if (err == CHIP_END_OF_TLV)
     {

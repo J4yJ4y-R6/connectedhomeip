@@ -241,9 +241,11 @@ CHIP_ERROR VerifyAttestationCertificateFormat(const ByteSpan & cert, Attestation
     // "version" value is 1 higher than the actual encoded value.
     VerifyOrExit(mbed_cert.CHIP_CRYPTO_PAL_PRIVATE_X509(version) - 1 == 2, error = CHIP_ERROR_INTERNAL);
 
-    // Verify signature algorithms is ECDSA with SHA256.
+    // Matter cert path currently supports ECDSA-with-SHA256 only.
+    // Return explicit unsupported signature type for PQC signatures (e.g. Dilithium)
+    // rather than a generic internal error.
     VerifyOrExit(OID_CMP(sOID_SigAlgo_ECDSAWithSHA256, mbed_cert.CHIP_CRYPTO_PAL_PRIVATE_X509(sig_oid)),
-                 error = CHIP_ERROR_INTERNAL);
+                 error = CHIP_ERROR_UNSUPPORTED_SIGNATURE_TYPE);
 
     // Verify public key presence and format.
     {
@@ -571,10 +573,10 @@ CHIP_ERROR ExtractPubkeyFromX509Cert(const ByteSpan & certificate, Crypto::P256P
 #else
     {
         VerifyOrExit(mbedtls_pk_get_type(&(mbed_cert.CHIP_CRYPTO_PAL_PRIVATE_X509(pk))) == MBEDTLS_PK_ECKEY,
-                     error = CHIP_ERROR_INVALID_ARGUMENT);
+                 error = CHIP_ERROR_WRONG_KEY_TYPE);
 
         mbedtls_ecp_keypair * keypair = mbedtls_pk_ec(mbed_cert.CHIP_CRYPTO_PAL_PRIVATE_X509(pk));
-        VerifyOrExit(keypair->CHIP_CRYPTO_PAL_PRIVATE(grp).id == MapECPGroupId(pubkey.Type()), error = CHIP_ERROR_INVALID_ARGUMENT);
+        VerifyOrExit(keypair->CHIP_CRYPTO_PAL_PRIVATE(grp).id == MapECPGroupId(pubkey.Type()), error = CHIP_ERROR_WRONG_KEY_TYPE);
         // Copy the public key from the cert in raw point format
         result = mbedtls_ecp_point_write_binary(&keypair->CHIP_CRYPTO_PAL_PRIVATE(grp), &keypair->CHIP_CRYPTO_PAL_PRIVATE(Q),
                                                 MBEDTLS_ECP_PF_UNCOMPRESSED, &pubkey_size, Uint8::to_uchar(pubkey.Bytes()),

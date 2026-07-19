@@ -1,0 +1,79 @@
+# Standalone OQS implementation using:
+#   Kyber-768:    kyber-reference/ref/
+#   Dilithium-3:  dilithium-reference/ref/ (compiled with DILITHIUM_MODE=3)
+# No BoringSSL dependency — portable C, works on ESP32 (mbedTLS) and Linux.
+
+config("oqs_public_config") {
+  include_dirs = [ "include" ]
+}
+
+config("kyber_include_config") {
+  include_dirs = [ "../../../kyber-reference/ref" ]
+}
+
+config("dilithium_include_config") {
+  include_dirs = [ "../../../dilithium-reference/ref" ]
+  defines = [ "DILITHIUM_MODE=3" ]
+}
+
+config("dilithium_ns_config") {
+  # Force-include the namespace header to rename all Dilithium internal
+  # symbols that would otherwise conflict with identically-named Kyber symbols.
+  cflags = [
+    "-include",
+    rebase_path("stub/dilithium_ns.h"),
+  ]
+}
+
+# Dilithium-3 compiled as its own source_set so the namespace prefix is
+# applied only to these files (not to Kyber or oqs_stub.c).
+source_set("dilithium3_ref") {
+  sources = [
+    "../../../dilithium-reference/ref/ntt.c",
+    "../../../dilithium-reference/ref/packing.c",
+    "../../../dilithium-reference/ref/poly.c",
+    "../../../dilithium-reference/ref/polyvec.c",
+    "../../../dilithium-reference/ref/reduce.c",
+    "../../../dilithium-reference/ref/rounding.c",
+    "../../../dilithium-reference/ref/sign.c",
+    "../../../dilithium-reference/ref/symmetric-shake.c",
+  ]
+
+  configs += [
+    ":dilithium_include_config",
+    ":dilithium_ns_config",
+    ":kyber_include_config",  # for shared fips202.h
+  ]
+
+  # Dilithium uses the same fips202 (keccak) as Kyber; fips202.c is compiled
+  # once in the :oqs target below to avoid duplicate symbol errors.
+}
+
+static_library("oqs") {
+  sources = [
+    "stub/oqs_stub.c",
+
+    # Kyber-768 reference implementation
+    "../../../kyber-reference/ref/cbd.c",
+    "../../../kyber-reference/ref/fips202.c",
+    "../../../kyber-reference/ref/indcpa.c",
+    "../../../kyber-reference/ref/kem.c",
+    "../../../kyber-reference/ref/ntt.c",
+    "../../../kyber-reference/ref/poly.c",
+    "../../../kyber-reference/ref/polyvec.c",
+    "../../../kyber-reference/ref/reduce.c",
+    "../../../kyber-reference/ref/symmetric-shake.c",
+    "../../../kyber-reference/ref/verify.c",
+  ]
+
+  # randombytes: platform-specific RNG
+  if (current_os == "freertos") {
+    sources += [ "stub/randombytes_esp32.c" ]
+  } else {
+    sources += [ "../../../kyber-reference/ref/randombytes.c" ]
+  }
+
+  public_configs = [ ":oqs_public_config" ]
+  configs += [ ":kyber_include_config" ]
+  deps = [ ":dilithium3_ref" ]
+}

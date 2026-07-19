@@ -61,6 +61,7 @@
 #include <credentials/tests/CHIPAttCert_test_vectors.h>
 #include <credentials/tests/CHIPCert_test_vectors.h>
 
+#include <crypto/CHIPCryptoPALPQC.h>
 #include <lib/asn1/ASN1.h>
 #include <lib/asn1/ASN1Macros.h>
 #include <lib/core/TLV.h>
@@ -1437,6 +1438,54 @@ TEST_F(TestChipCryptoPAL, TestECDSA_ValidationHashInvalidParam)
     validation_error = keypair.Pubkey().ECDSA_validate_hash_signature(hash, sizeof(hash) - 5, signature);
     EXPECT_EQ(validation_error, CHIP_ERROR_INVALID_ARGUMENT);
     signing_error = CHIP_NO_ERROR;
+}
+
+TEST_F(TestChipCryptoPAL, TestDilithium_SignVerify)
+{
+    HeapChecker heapChecker;
+    uint8_t message[] = { 'P', 'Q', 'C', ' ', 'D', 'i', 'l', 'i', 't', 'h', 'i', 'u', 'm' };
+
+#if CHIP_CRYPTO_PQC
+    DilithiumKeypair keypair;
+    ASSERT_EQ(keypair.Initialize(), CHIP_NO_ERROR);
+
+    DilithiumPublicKey pubkey;
+    ASSERT_EQ(keypair.Pubkey(pubkey), CHIP_NO_ERROR);
+
+    DilithiumSignature signature;
+    ASSERT_EQ(keypair.Sign(message, sizeof(message), signature), CHIP_NO_ERROR);
+    EXPECT_EQ(keypair.Verify(pubkey, message, sizeof(message), signature), CHIP_NO_ERROR);
+
+    message[0] = 'X';
+    EXPECT_EQ(keypair.Verify(pubkey, message, sizeof(message), signature), CHIP_ERROR_INVALID_SIGNATURE);
+#else
+    GTEST_SKIP() << "Skipping test: CHIP_CRYPTO_PQC not enabled";
+#endif
+}
+
+TEST_F(TestChipCryptoPAL, TestKyber_EncapsulateDecapsulate)
+{
+    HeapChecker heapChecker;
+
+#if CHIP_CRYPTO_PQC
+    KyberKeypair keypair;
+    ASSERT_EQ(keypair.Initialize(), CHIP_NO_ERROR);
+
+    KyberPublicKey pubkey;
+    ASSERT_EQ(keypair.Pubkey(pubkey), CHIP_NO_ERROR);
+
+    uint8_t ciphertext[kKyber_Ciphertext_Length];
+    KyberSharedSecret sharedSecret1;
+    KyberSharedSecret sharedSecret2;
+
+    ASSERT_EQ(keypair.Encapsulate(pubkey, ciphertext, sizeof(ciphertext), sharedSecret1), CHIP_NO_ERROR);
+    ASSERT_EQ(keypair.Decapsulate(ciphertext, sizeof(ciphertext), sharedSecret2), CHIP_NO_ERROR);
+
+    ASSERT_EQ(sharedSecret1.Length(), sharedSecret2.Length());
+    EXPECT_EQ(memcmp(sharedSecret1.ConstBytes(), sharedSecret2.ConstBytes(), sharedSecret1.Length()), 0);
+#else
+    GTEST_SKIP() << "Skipping test: CHIP_CRYPTO_PQC not enabled";
+#endif
 }
 
 TEST_F(TestChipCryptoPAL, TestP256_DeterministicECDSA_Sanity)

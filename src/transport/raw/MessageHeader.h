@@ -32,6 +32,7 @@
 #include <lib/core/CHIPError.h>
 #include <lib/core/GroupId.h>
 #include <lib/core/Optional.h>
+#include <crypto/CryptoBuildConfig.h>
 #include <lib/core/PeerId.h>
 #include <lib/support/BitFlags.h>
 #include <lib/support/BufferReader.h>
@@ -44,7 +45,16 @@ namespace chip {
 
 namespace detail {
 // Figure out the max size of a packet we can allocate, including all headers.
+// With CHIP_CRYPTO_PQC the CASE Sigma1 message carries an extra 1184-byte Kyber-768 public
+// key, and Sigma2 carries an extra 1088-byte Kyber ciphertext. Those push the message past
+// the IPv6 minimum MTU of 1280 bytes, so on PQC builds we widen the per-spec ceiling. IPv6
+// fragmentation handles the on-wire delivery (or rely on loopback/jumbo-frame MTUs for
+// local tests). This change is local to PQC builds.
+#if CHIP_CRYPTO_PQC
+static constexpr size_t kMaxIPPacketSizeBytes       = 16384;
+#else
 static constexpr size_t kMaxIPPacketSizeBytes       = 1280;
+#endif
 static constexpr size_t kMaxUDPAndIPHeaderSizeBytes = 48;
 
 static_assert(kMaxIPPacketSizeBytes >= kMaxUDPAndIPHeaderSizeBytes + CHIP_SYSTEM_HEADER_RESERVE_SIZE,

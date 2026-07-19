@@ -77,6 +77,7 @@ chip_gn_arg_append("esp32_cc"              "\"${CMAKE_C_COMPILER}\"")
 chip_gn_arg_append("esp32_cxx"             "\"${CMAKE_CXX_COMPILER}\"")
 chip_gn_arg_append("esp32_cpu"             "\"esp32\"")
 chip_gn_arg_bool("is_debug"                ${is_debug})
+chip_gn_arg_bool("chip_crypto_pqc"         "true")
 
 # Use PSA Crypto backend for esp-idf v6.0 and onwards
 # esp-idf v6.0 and onwards migrated to mbedTLS 4.x where PSA is the crypto backend primary interface
