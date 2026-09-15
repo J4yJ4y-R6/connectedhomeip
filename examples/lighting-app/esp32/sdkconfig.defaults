@@ -66,6 +66,19 @@ CONFIG_ENABLE_OTA_REQUESTOR=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=16384
 
-# Dilithium keygen/sign uses ~6-8KB of stack; bump the main and CHIP task stacks
+# Kyber-768 indcpa needs ~12.4KB of stack and runs on the CHIP task; Dilithium-3
+# (~78KB) is offloaded to its own deep-stack task in CHIPCryptoPALPQC.cpp.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-CONFIG_CHIP_TASK_STACK_SIZE=8192
+CONFIG_CHIP_TASK_STACK_SIZE=24576
+
+# PQC: a hybrid CASE Sigma2 is ~7.7KB, far beyond the ~1.5KB lwIP pbuf pool buffer.
+# Switch CHIP PacketBuffers to heap-backed PBUF_RAM (maps to
+# CHIP_SYSTEM_CONFIG_PACKETBUFFER_LWIP_PBUF_RAM via src/platform/ESP32/SystemPlatformConfig.h)
+# so CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX applies.
+CONFIG_USE_LWIP_PBUF_RAM_PACKETBUFFER=y
+
+# PQC: those CASE datagrams exceed the link MTU and arrive fragmented; lwIP drops
+# fragments unless reassembly is compiled in (both default to n).
+CONFIG_LWIP_IP6_REASSEMBLY=y
+CONFIG_LWIP_IP4_REASSEMBLY=y
+CONFIG_LWIP_IP_REASS_MAX_PBUFS=40

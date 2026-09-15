@@ -289,7 +289,7 @@ protected:
         ByteSpan responderICAC;
         ByteSpan resumptionId;
         Crypto::P256ECDSASignature tbsData2Signature;
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
         Crypto::DilithiumPublicKey dilithiumPubKey;
         Crypto::DilithiumSignature dilithiumSignature;
         bool dilithiumPresent = false;
@@ -338,7 +338,7 @@ protected:
         MutableByteSpan nocCert;
 
         Crypto::P256ECDSASignature tbsData3Signature;
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
         // Hybrid PQC: ephemeral Dilithium-3 keypair produced in SendSigma3b and serialized into TBE3
         // so the responder can verify alongside ECDSA.
         Crypto::DilithiumPublicKey dilithiumPubKey;
@@ -360,7 +360,7 @@ protected:
         ByteSpan fabricRCAC;
 
         Crypto::P256ECDSASignature tbsData3Signature;
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
         Crypto::DilithiumPublicKey dilithiumPubKey;
         Crypto::DilithiumSignature dilithiumSignature;
         bool dilithiumPresent = false;

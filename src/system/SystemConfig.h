@@ -444,17 +444,39 @@
  *
  *      The size of PacketBuffer structure does not need to be included in this value.
  */
+#include <crypto/CryptoBuildConfig.h>
+
+/**
+ *  @def CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX
+ *
+ *  @brief
+ *      The PacketBuffer ceiling used by CHIP_CRYPTO_PQC builds, on both socket and LwIP platforms.
+ *
+ *      Kyber-only (the default): Sigma2 carries the responder NOC/ICAC (~1 KB) plus a 1088-byte
+ *      Kyber-768 ciphertext, and Sigma1 a 1184-byte Kyber-768 public key - ~2.4 KB, so 4096 is
+ *      ample. With CHIP_CRYPTO_PQC_DILITHIUM the ephemeral Dilithium-3 public key (1952 bytes) and
+ *      signature (3309 bytes) push Sigma2 to ~7.7 KB, hence the larger ceiling.
+ *
+ *      Note this is also the per-buffer allocation size when packet buffers come from the lwIP heap
+ *      (CHIP_SYSTEM_CONFIG_PACKETBUFFER_LWIP_PBUF_RAM), so it is charged against free heap on every
+ *      PacketBuffer - keep it no larger than the largest message actually sent.
+ */
+#ifndef CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX
+#if CHIP_CRYPTO_PQC_DILITHIUM
+#define CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX 10240
+#else
+#define CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX 4096
+#endif
+#endif /* CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX */
+
 #if CHIP_SYSTEM_CONFIG_USE_LWIP && !defined(DOXYGEN)
 #ifdef CHIP_SYSTEM_CONFIG_PACKETBUFFER_CAPACITY_MAX
 #error "CHIP_SYSTEM_CONFIG_PACKETBUFFER_CAPACITY_MAX cannot be defined on an LwIP-based platform."
 #endif /* CHIP_SYSTEM_CONFIG_PACKETBUFFER_CAPACITY_MAX */
 #else /* !CHIP_SYSTEM_CONFIG_USE_LWIP */
 #ifndef CHIP_SYSTEM_CONFIG_PACKETBUFFER_CAPACITY_MAX
-// Default 1583 covers the spec-mandated 1280-byte IPv6 MTU plus headroom. With CHIP_CRYPTO_PQC,
-// CASE Sigma1 carries an extra 1184-byte Kyber-768 pubkey and Sigma2 an extra 1088-byte Kyber
-// ciphertext (plus several KB once Dilithium signatures are exchanged on the wire — see
-// PQC-ROADMAP.md). Bump the buffer ceiling generously to accommodate that on hosted platforms.
-#include <crypto/CryptoBuildConfig.h>
+// Default 1583 covers the spec-mandated 1280-byte IPv6 MTU plus headroom. With CHIP_CRYPTO_PQC the
+// CASE Sigma messages grow well past that; see CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX.
 #if CHIP_CRYPTO_PQC
 #define CHIP_SYSTEM_CONFIG_PACKETBUFFER_CAPACITY_MAX 16384
 #else

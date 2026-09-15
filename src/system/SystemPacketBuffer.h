@@ -122,7 +122,13 @@ public:
      * The maximum size of a regular buffer an application can allocate with no protocol header reserve.
      */
 #if CHIP_SYSTEM_CONFIG_USE_LWIP
+#if CHIP_CRYPTO_PQC && CHIP_SYSTEM_CONFIG_PACKETBUFFER_LWIP_PBUF_RAM
+    // PBUF_POOL buffers top out at PBUF_POOL_BUFSIZE (~1.5 KB on ESP-IDF), which cannot hold a
+    // hybrid CASE Sigma2. PBUF_RAM allocations come from the heap, so the ceiling can be raised.
+    static constexpr size_t kMaxSizeWithoutReserve = CHIP_SYSTEM_CONFIG_PQC_PACKETBUFFER_CAPACITY_MAX;
+#else
     static constexpr size_t kMaxSizeWithoutReserve = LWIP_MEM_ALIGN_SIZE(PBUF_POOL_BUFSIZE);
+#endif
 #else
     static constexpr size_t kMaxSizeWithoutReserve = CHIP_SYSTEM_CONFIG_PACKETBUFFER_CAPACITY_MAX;
 #endif

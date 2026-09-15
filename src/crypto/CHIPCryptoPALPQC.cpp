@@ -6,6 +6,13 @@
 #include "CHIPCryptoPALPQC.h"
 #include "CHIPCryptoPAL.h"
 #include <lib/support/logging/CHIPLogging.h>
+
+#ifdef ESP_PLATFORM
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#endif
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
@@ -23,6 +30,89 @@
 
 namespace chip {
 namespace Crypto {
+
+// ---------------------------------------------------------------------------
+// Deep-stack offload
+//
+// The Dilithium-3 reference implementation keeps its polynomial matrices in
+// automatic storage: sign() alone needs ~78 KB of stack (mat[K] is a 6-element
+// polyvecl = 30 KB by itself), and keypair()/verify() need ~60 KB. That is an
+// order of magnitude more than the CHIP task's stack, so on FreeRTOS targets we
+// run those three operations on a short-lived task with a stack sized for them
+// and block the caller until it finishes. On hosted platforms the thread stack
+// is already large enough and the call runs inline.
+// ---------------------------------------------------------------------------
+
+#ifndef CHIP_PQC_DILITHIUM_STACK_SIZE
+#define CHIP_PQC_DILITHIUM_STACK_SIZE (96 * 1024)
+#endif
+
+#ifdef ESP_PLATFORM
+
+namespace {
+
+struct DeepStackJob
+{
+    CHIP_ERROR (*fn)(void * ctx);
+    void * ctx;
+    CHIP_ERROR result;
+    SemaphoreHandle_t done;
+};
+
+void DeepStackTrampoline(void * param)
+{
+    DeepStackJob * job = static_cast<DeepStackJob *>(param);
+    job->result        = job->fn(job->ctx);
+
+    // ESP-IDF reports the high-water mark in bytes; log it so the real headroom
+    // of CHIP_PQC_DILITHIUM_STACK_SIZE is measurable rather than guessed.
+    ChipLogProgress(Crypto, "[PQC] Dilithium deep-stack task: %u of %u stack bytes still free",
+                    static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+                    static_cast<unsigned>(CHIP_PQC_DILITHIUM_STACK_SIZE));
+
+    xSemaphoreGive(job->done);
+    vTaskDelete(nullptr);
+}
+
+} // namespace
+
+static CHIP_ERROR RunOnDeepStack(CHIP_ERROR (*fn)(void * ctx), void * ctx)
+{
+    DeepStackJob job = { fn, ctx, CHIP_ERROR_INTERNAL, nullptr };
+
+    job.done = xSemaphoreCreateBinary();
+    if (job.done == nullptr)
+    {
+        ChipLogError(Crypto, "[PQC] Dilithium deep-stack: semaphore allocation failed");
+        return CHIP_ERROR_NO_MEMORY;
+    }
+
+    // Same priority as the caller, so the handshake neither starves nor preempts.
+    TaskHandle_t task = nullptr;
+    BaseType_t rc     = xTaskCreate(DeepStackTrampoline, "pqc_dilithium", CHIP_PQC_DILITHIUM_STACK_SIZE, &job,
+                                    uxTaskPriorityGet(nullptr), &task);
+    if (rc != pdPASS)
+    {
+        vSemaphoreDelete(job.done);
+        ChipLogError(Crypto, "[PQC] Dilithium deep-stack: cannot create task with %u-byte stack (free heap %u bytes)",
+                     static_cast<unsigned>(CHIP_PQC_DILITHIUM_STACK_SIZE),
+                     static_cast<unsigned>(esp_get_free_heap_size()));
+        return CHIP_ERROR_NO_MEMORY;
+    }
+
+    xSemaphoreTake(job.done, portMAX_DELAY);
+    vSemaphoreDelete(job.done);
+    return job.result;
+}
+
+#else // !ESP_PLATFORM
+
+static CHIP_ERROR RunOnDeepStack(CHIP_ERROR (*fn)(void * ctx), void * ctx)
+{
+    return fn(ctx);
+}
+
+#endif // ESP_PLATFORM
 
 CHIP_ERROR KyberKeypair::Initialize()
 {
@@ -220,8 +310,21 @@ void KyberKeypair::Clear()
     ClearSecretData(mPublic);
 }
 
-CHIP_ERROR DilithiumKeypair::Initialize()
+namespace {
+struct DilithiumInitArgs
 {
+    uint8_t * pub;
+    size_t pub_cap;
+    uint8_t * priv;
+    size_t priv_cap;
+};
+} // namespace
+
+static CHIP_ERROR DilithiumInitializeOnStack(void * ctx)
+{
+    DilithiumInitArgs & a = *static_cast<DilithiumInitArgs *>(ctx);
+    uint8_t * mPublic     = a.pub;
+    uint8_t * mPrivate    = a.priv;
 #if HAVE_OQS
     ChipLogProgress(Crypto, "[PQC] Dilithium-3 Initialize() - generating keypair");
     
@@ -252,8 +355,8 @@ CHIP_ERROR DilithiumKeypair::Initialize()
         return CHIP_ERROR_INTERNAL;
     }
 
-    size_t copy_pub = std::min<size_t>(sig->length_public_key, sizeof(mPublic));
-    size_t copy_priv = std::min<size_t>(sig->length_secret_key, sizeof(mPrivate));
+    size_t copy_pub = std::min<size_t>(sig->length_public_key, a.pub_cap);
+    size_t copy_priv = std::min<size_t>(sig->length_secret_key, a.priv_cap);
     memcpy(mPublic, pub, copy_pub);
     memcpy(mPrivate, priv, copy_priv);
 
@@ -265,9 +368,15 @@ CHIP_ERROR DilithiumKeypair::Initialize()
 #else
     (void)mPublic;
     (void)mPrivate;
-    ChipLogError(chipModule_Crypto, "PQC: Dilithium-3 Initialize() - HAVE_OQS not defined");
+    ChipLogError(Crypto, "PQC: Dilithium-3 Initialize() - HAVE_OQS not defined");
     return CHIP_ERROR_UNSUPPORTED_CHIP_FEATURE;
 #endif
+}
+
+CHIP_ERROR DilithiumKeypair::Initialize()
+{
+    DilithiumInitArgs args = { mPublic, sizeof(mPublic), mPrivate, sizeof(mPrivate) };
+    return RunOnDeepStack(DilithiumInitializeOnStack, &args);
 }
 
 CHIP_ERROR DilithiumPublicKey::SetBytes(const uint8_t * data, size_t len)
@@ -282,8 +391,23 @@ CHIP_ERROR DilithiumPublicKey::SetBytes(const uint8_t * data, size_t len)
     return CHIP_NO_ERROR;
 }
 
-CHIP_ERROR DilithiumKeypair::Sign(const uint8_t * msg, size_t msg_len, DilithiumSignature & out_sig) const
+namespace {
+struct DilithiumSignArgs
 {
+    const uint8_t * priv;
+    const uint8_t * msg;
+    size_t msg_len;
+    DilithiumSignature * out_sig;
+};
+} // namespace
+
+static CHIP_ERROR DilithiumSignOnStack(void * ctx)
+{
+    DilithiumSignArgs & a         = *static_cast<DilithiumSignArgs *>(ctx);
+    const uint8_t * mPrivate      = a.priv;
+    const uint8_t * msg           = a.msg;
+    const size_t msg_len          = a.msg_len;
+    DilithiumSignature & out_sig  = *a.out_sig;
 #if HAVE_OQS
     ChipLogProgress(Crypto, "[PQC] Dilithium-3 Sign() - signing %zu-byte message", msg_len);
     
@@ -334,9 +458,29 @@ CHIP_ERROR DilithiumKeypair::Sign(const uint8_t * msg, size_t msg_len, Dilithium
 #endif
 }
 
-CHIP_ERROR DilithiumKeypair::Verify(const DilithiumPublicKey & pub, const uint8_t * msg, size_t msg_len,
-                                    const DilithiumSignature & sig) const
+CHIP_ERROR DilithiumKeypair::Sign(const uint8_t * msg, size_t msg_len, DilithiumSignature & out_sig) const
 {
+    DilithiumSignArgs args = { mPrivate, msg, msg_len, &out_sig };
+    return RunOnDeepStack(DilithiumSignOnStack, &args);
+}
+
+namespace {
+struct DilithiumVerifyArgs
+{
+    const DilithiumPublicKey * pub;
+    const uint8_t * msg;
+    size_t msg_len;
+    const DilithiumSignature * sig;
+};
+} // namespace
+
+static CHIP_ERROR DilithiumVerifyOnStack(void * ctx)
+{
+    DilithiumVerifyArgs & a       = *static_cast<DilithiumVerifyArgs *>(ctx);
+    const DilithiumPublicKey & pub = *a.pub;
+    const uint8_t * msg            = a.msg;
+    const size_t msg_len           = a.msg_len;
+    const DilithiumSignature & sig = *a.sig;
 #if HAVE_OQS
     ChipLogProgress(Crypto, "[PQC] Dilithium-3 Verify() - verifying %zu-byte message with %zu-byte signature", msg_len, sig.Length());
     
@@ -367,6 +511,13 @@ CHIP_ERROR DilithiumKeypair::Verify(const DilithiumPublicKey & pub, const uint8_
     (void)sig;
     return CHIP_ERROR_UNSUPPORTED_CHIP_FEATURE;
 #endif
+}
+
+CHIP_ERROR DilithiumKeypair::Verify(const DilithiumPublicKey & pub, const uint8_t * msg, size_t msg_len,
+                                    const DilithiumSignature & sig) const
+{
+    DilithiumVerifyArgs args = { &pub, msg, msg_len, &sig };
+    return RunOnDeepStack(DilithiumVerifyOnStack, &args);
 }
 
 CHIP_ERROR DilithiumKeypair::Pubkey(DilithiumPublicKey & out_pub) const

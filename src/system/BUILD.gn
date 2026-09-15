@@ -176,7 +176,9 @@ source_set("system_config_header") {
     "${chip_root}/src/platform:platform_buildconfig",
   ]
 
-  public_deps = []
+  # SystemConfig.h includes crypto/CryptoBuildConfig.h to size PacketBuffers for
+  # CHIP_CRYPTO_PQC builds, so the generated header must exist before we compile.
+  public_deps = [ "${chip_root}/src/crypto:crypto_buildconfig" ]
 
   if (target_cpu != "esp32") {
     if (chip_system_config_use_lwip) {

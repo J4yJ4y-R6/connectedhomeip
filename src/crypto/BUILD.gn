@@ -40,6 +40,7 @@ buildconfig_header("crypto_buildconfig") {
     "CHIP_CRYPTO_MBEDTLS=${chip_crypto_mbedtls}",
     "CHIP_CRYPTO_PSA=${chip_crypto_psa}",
     "CHIP_CRYPTO_PQC=${chip_crypto_pqc}",
+    "CHIP_CRYPTO_PQC_DILITHIUM=${chip_crypto_pqc_dilithium}",
     "CHIP_CRYPTO_SPAKE2P_MBEDTLS=${chip_crypto_spake2p_mbedtls}",
     "CHIP_CRYPTO_SPAKE2P_PSA=${chip_crypto_spake2p_psa}",
     "CHIP_CRYPTO_SPAKE2P_CUSTOM=${chip_crypto_spake2p_custom}",
@@ -181,9 +182,9 @@ if (chip_crypto_pqc) {
     if (chip_external_pqc) {
       public_configs = [ ":oqs_config" ]
     }
-    # If vendoring liboqs in-tree, add the GN target (e.g. //third_party/oqs:oqs) to public_deps here.
+    # If vendoring liboqs in-tree, add the GN target (e.g. ${chip_root}/third_party/oqs:oqs) to public_deps here.
     if (!chip_external_pqc) {
-      public_deps += [ "//third_party/oqs:oqs" ]
+      public_deps += [ "${chip_root}/third_party/oqs:oqs" ]
     }
   }
 }

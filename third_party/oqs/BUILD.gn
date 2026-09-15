@@ -1,52 +1,53 @@
 # Standalone OQS implementation using:
-#   Kyber-768:    kyber-reference/ref/
+#   Kyber-768:    kyber-reference/ref/    (symlink to the pq-crystals reference tree)
 #   Dilithium-3:  dilithium-reference/ref/ (compiled with DILITHIUM_MODE=3)
 # No BoringSSL dependency — portable C, works on ESP32 (mbedTLS) and Linux.
+
+# The pq-crystals reference code keeps its polynomial matrices in automatic
+# storage, so frames far exceed Matter's -Wstack-usage=8192 budget (Dilithium-3
+# sign() ~78 KB, Kyber-768 indcpa ~12 KB). Those are inherent to the reference
+# implementation, not defects to fix here: Dilithium runs on a dedicated
+# deep-stack task (see CHIPCryptoPALPQC.cpp) and Kyber runs on the CHIP task
+# with CONFIG_CHIP_TASK_STACK_SIZE raised to match.
+config("oqs_reference_stack_config") {
+  cflags = [ "-Wno-error=stack-usage=" ]
+}
 
 config("oqs_public_config") {
   include_dirs = [ "include" ]
 }
 
 config("kyber_include_config") {
-  include_dirs = [ "../../../kyber-reference/ref" ]
+  include_dirs = [ "kyber-reference/ref" ]
 }
 
 config("dilithium_include_config") {
-  include_dirs = [ "../../../dilithium-reference/ref" ]
+  include_dirs = [ "dilithium-reference/ref" ]
   defines = [ "DILITHIUM_MODE=3" ]
 }
 
-config("dilithium_ns_config") {
-  # Force-include the namespace header to rename all Dilithium internal
-  # symbols that would otherwise conflict with identically-named Kyber symbols.
-  cflags = [
-    "-include",
-    rebase_path("stub/dilithium_ns.h"),
-  ]
-}
-
-# Dilithium-3 compiled as its own source_set so the namespace prefix is
-# applied only to these files (not to Kyber or oqs_stub.c).
+# Dilithium-3 as its own source_set. Both reference trees namespace every symbol
+# they export (DILITHIUM_NAMESPACE / KYBER_NAMESPACE, and each ships its own
+# independently-namespaced fips202), so the two can be linked side by side with
+# no renaming. Each keeps its own fips202.c; do not put the two include dirs on
+# the same target or the quoted #include "fips202.h" resolves to the wrong one.
 source_set("dilithium3_ref") {
   sources = [
-    "../../../dilithium-reference/ref/ntt.c",
-    "../../../dilithium-reference/ref/packing.c",
-    "../../../dilithium-reference/ref/poly.c",
-    "../../../dilithium-reference/ref/polyvec.c",
-    "../../../dilithium-reference/ref/reduce.c",
-    "../../../dilithium-reference/ref/rounding.c",
-    "../../../dilithium-reference/ref/sign.c",
-    "../../../dilithium-reference/ref/symmetric-shake.c",
+    "dilithium-reference/ref/fips202.c",
+    "dilithium-reference/ref/ntt.c",
+    "dilithium-reference/ref/packing.c",
+    "dilithium-reference/ref/poly.c",
+    "dilithium-reference/ref/polyvec.c",
+    "dilithium-reference/ref/reduce.c",
+    "dilithium-reference/ref/rounding.c",
+    "dilithium-reference/ref/sign.c",
+    "dilithium-reference/ref/symmetric-shake.c",
   ]
 
   configs += [
     ":dilithium_include_config",
-    ":dilithium_ns_config",
-    ":kyber_include_config",  # for shared fips202.h
+    ":oqs_reference_stack_config",
   ]
-
-  # Dilithium uses the same fips202 (keccak) as Kyber; fips202.c is compiled
-  # once in the :oqs target below to avoid duplicate symbol errors.
 }
 
 static_library("oqs") {
@@ -54,26 +55,29 @@ static_library("oqs") {
     "stub/oqs_stub.c",
 
     # Kyber-768 reference implementation
-    "../../../kyber-reference/ref/cbd.c",
-    "../../../kyber-reference/ref/fips202.c",
-    "../../../kyber-reference/ref/indcpa.c",
-    "../../../kyber-reference/ref/kem.c",
-    "../../../kyber-reference/ref/ntt.c",
-    "../../../kyber-reference/ref/poly.c",
-    "../../../kyber-reference/ref/polyvec.c",
-    "../../../kyber-reference/ref/reduce.c",
-    "../../../kyber-reference/ref/symmetric-shake.c",
-    "../../../kyber-reference/ref/verify.c",
+    "kyber-reference/ref/cbd.c",
+    "kyber-reference/ref/fips202.c",
+    "kyber-reference/ref/indcpa.c",
+    "kyber-reference/ref/kem.c",
+    "kyber-reference/ref/ntt.c",
+    "kyber-reference/ref/poly.c",
+    "kyber-reference/ref/polyvec.c",
+    "kyber-reference/ref/reduce.c",
+    "kyber-reference/ref/symmetric-shake.c",
+    "kyber-reference/ref/verify.c",
   ]
 
-  # randombytes: platform-specific RNG
+  # randombytes: platform-specific RNG, shared by both Kyber and Dilithium
   if (current_os == "freertos") {
     sources += [ "stub/randombytes_esp32.c" ]
   } else {
-    sources += [ "../../../kyber-reference/ref/randombytes.c" ]
+    sources += [ "kyber-reference/ref/randombytes.c" ]
   }
 
   public_configs = [ ":oqs_public_config" ]
-  configs += [ ":kyber_include_config" ]
+  configs += [
+    ":kyber_include_config",
+    ":oqs_reference_stack_config",
+  ]
   deps = [ ":dilithium3_ref" ]
 }

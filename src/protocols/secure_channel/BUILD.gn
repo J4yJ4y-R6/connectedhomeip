@@ -1,5 +1,7 @@
 import("//build_overrides/chip.gni")
 
+import("${chip_root}/src/crypto/crypto.gni")
+
 source_set("check-in-counter") {
   sources = [
     "CheckInCounter.cpp",
@@ -78,6 +80,15 @@ static_library("secure_channel") {
   ]
 
   cflags = [ "-Wconversion" ]
+
+  if (chip_crypto_pqc) {
+    # The PQC Sigma handlers hold Kyber/Dilithium keys and signatures in
+    # automatic storage (HandleSigma1 ~11.7 KB, HandleSigma2 ~11.8 KB), over the
+    # -Wstack-usage=8192 budget in build/config/compiler/BUILD.gn. That is safe
+    # only because the task running CASE is sized for it: on ESP32 see
+    # CONFIG_CHIP_TASK_STACK_SIZE in the app's sdkconfig.defaults.
+    cflags += [ "-Wno-error=stack-usage=" ]
+  }
 
   public_deps = [
     ":check-in-message",

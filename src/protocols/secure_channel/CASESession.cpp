@@ -59,7 +59,7 @@ enum class TBEDataTags : uint8_t
     kSenderICAC   = 2,
     kSignature    = 3,
     kResumptionID = 4,
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     // Hybrid PQC extension: ephemeral Dilithium-3 pubkey + signature carried inside the
     // encrypted TBE blob alongside the ECDSA signature. Both signatures must verify.
     kDilithiumPubKey    = 5,
@@ -1274,7 +1274,7 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
 
     // Construct Sigma2 TBS Data
     P256ECDSASignature tbsData2Signature;
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     Crypto::DilithiumKeypair responderDilithiumKp;
     Crypto::DilithiumPublicKey responderDilithiumPubKey;
     Crypto::DilithiumSignature responderDilithiumSig;
@@ -1297,7 +1297,7 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
         // Generate a Signature
         ReturnErrorOnFailure(mFabricsTable->SignWithOpKeypair(mFabricIndex, msgR2SignedSpan, tbsData2Signature));
 
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
         // Generate the ephemeral Dilithium-3 keypair and sign the same TBS data. The pubkey and
         // signature are serialized into TBE2 below so the initiator can verify them peer-to-peer.
         ChipLogProgress(SecureChannel, "[PQC] CASE Sigma2: signing TBSData2 with ephemeral Dilithium-3");
@@ -1312,7 +1312,7 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
                                                       icaCert.size(),                              // responderICAC
                                                       tbsData2Signature.Length(),                  // signature
                                                       SessionResumptionStorage::kResumptionIdSize  // resumptionID
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
                                                       ,
                                                       Crypto::kDilithium_PublicKey_Length,         // dilithiumPubKey
                                                       Crypto::kDilithium_Signature_Length          // dilithiumSignature
@@ -1356,7 +1356,7 @@ CHIP_ERROR CASESession::PrepareSigma2(EncodeSigma2Inputs & outSigma2Data)
     ReturnErrorOnFailure(DRBG_get_bytes(mNewResumptionId.data(), mNewResumptionId.size()));
     ReturnErrorOnFailure(tlvWriter.Put(AsTlvContextTag(TBEDataTags::kResumptionID), mNewResumptionId));
 
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     if (responderDilithiumReady)
     {
         ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kDilithiumPubKey),
@@ -1683,7 +1683,7 @@ CHIP_ERROR CASESession::HandleSigma2(System::PacketBufferHandle && msg)
     ReturnErrorOnFailure(responderPublicKey.ECDSA_validate_msg_signature(msgR2SignedSpan.data(), msgR2SignedSpan.size(),
                                                                          parsedSigma2TBEData.tbsData2Signature));
 
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     if (parsedSigma2TBEData.dilithiumPresent)
     {
         ChipLogProgress(SecureChannel, "[PQC] CASE Sigma2: verifying responder's Dilithium-3 signature over TBSData2");
@@ -1745,7 +1745,7 @@ CHIP_ERROR CASESession::ParseSigma2(ContiguousBufferTLVReader & tlvReader, Parse
                                                          kMax_ECDSA_Signature_Length,                 // signature
                                                          SessionResumptionStorage::kResumptionIdSize, // resumptionID
                                                          kCaseOverheadForFutureTBEData                // extra bytes for future-proofing
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
                                                          ,
                                                          Crypto::kDilithium_PublicKey_Length,         // dilithiumPubKey
                                                          Crypto::kDilithium_Signature_Length          // dilithiumSignature
@@ -1834,7 +1834,7 @@ CHIP_ERROR CASESession::ParseSigma2TBEData(ContiguousBufferTLVReader & decrypted
     VerifyOrReturnError(outParsedSigma2TBE.resumptionId.size() == SessionResumptionStorage::kResumptionIdSize,
                         CHIP_ERROR_INVALID_CASE_PARAMETER);
 
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     // Optional Dilithium-3 pubkey + signature, written by the PQC responder.
     CHIP_ERROR nextErr = decryptedDataTlvReader.Next();
     if (nextErr == CHIP_NO_ERROR && decryptedDataTlvReader.GetTag() == AsTlvContextTag(TBEDataTags::kDilithiumPubKey))
@@ -1961,7 +1961,7 @@ CHIP_ERROR CASESession::SendSigma3b(SendSigma3Data & data, bool & cancel)
         ReturnErrorOnFailure(data.fabricTable->SignWithOpKeypair(data.fabricIndex, data.msgR3SignedSpan, data.tbsData3Signature));
     }
 
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     // Sign TBSData3 with an ephemeral Dilithium-3 keypair; pubkey + signature are serialized into
     // TBE3 below so the responder can verify peer-to-peer alongside ECDSA.
     {
@@ -1978,7 +1978,7 @@ CHIP_ERROR CASESession::SendSigma3b(SendSigma3Data & data, bool & cancel)
     // Prepare Sigma3 TBE Data Blob
     data.msg_r3_encrypted_len =
         TLV::EstimateStructOverhead(data.nocCert.size(), data.icaCert.size(), data.tbsData3Signature.Length()
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
                                     ,
                                     Crypto::kDilithium_PublicKey_Length, Crypto::kDilithium_Signature_Length
 #endif
@@ -2010,7 +2010,7 @@ CHIP_ERROR CASESession::SendSigma3b(SendSigma3Data & data, bool & cancel)
 
         ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kSignature), data.tbsData3Signature.ConstBytes(),
                                                 static_cast<uint32_t>(data.tbsData3Signature.Length())));
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
         ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(TBEDataTags::kDilithiumPubKey),
                                                 data.dilithiumPubKey.ConstBytes(),
                                                 static_cast<uint32_t>(data.dilithiumPubKey.Length())));
@@ -2247,7 +2247,7 @@ CHIP_ERROR CASESession::ParseSigma3(ContiguousBufferTLVReader & tlvReader,
                                                          kMaxCHIPCertLength,                  // initiatorICAC
                                                          kMax_ECDSA_Signature_Length,         // signature
                                                          kCaseOverheadForFutureTBEData        // extra bytes for future-proofing
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
                                                          ,
                                                          Crypto::kDilithium_PublicKey_Length, // dilithiumPubKey
                                                          Crypto::kDilithium_Signature_Length  // dilithiumSignature
@@ -2299,7 +2299,7 @@ CHIP_ERROR CASESession::ParseSigma3TBEData(ContiguousBufferTLVReader & decrypted
     ReturnErrorOnFailure(decryptedDataTlvReader.GetBytes(outHandleSigma3TBEData.tbsData3Signature.Bytes(),
                                                          outHandleSigma3TBEData.tbsData3Signature.Length()));
 
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     // Optional Dilithium-3 pubkey + signature, written by the PQC initiator.
     CHIP_ERROR nextErr = decryptedDataTlvReader.Next();
     if (nextErr == CHIP_NO_ERROR && decryptedDataTlvReader.GetTag() == AsTlvContextTag(TBEDataTags::kDilithiumPubKey))
@@ -2345,7 +2345,7 @@ CHIP_ERROR CASESession::HandleSigma3b(HandleSigma3Data & data, bool & cancel)
     ReturnErrorOnFailure(initiatorPublicKey.ECDSA_validate_msg_signature(data.msgR3SignedSpan.data(), data.msgR3SignedSpan.size(),
                                                                          data.tbsData3Signature));
 
-#if CHIP_CRYPTO_PQC
+#if CHIP_CRYPTO_PQC && CHIP_CRYPTO_PQC_DILITHIUM
     if (data.dilithiumPresent)
     {
         ChipLogProgress(SecureChannel, "[PQC] CASE Sigma3: verifying initiator's Dilithium-3 signature over TBSData3");
