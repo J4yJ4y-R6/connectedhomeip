@@ -30,6 +30,9 @@
 #if CHIP_CRYPTO_SPAKE2P_PSA
 #include <crypto/PSASpake2p.h>
 #endif
+#if CHIP_CRYPTO_PQC
+#include <crypto/CHIPCryptoPALPQC.h>
+#endif
 #include <lib/support/Base64.h>
 #include <messaging/ExchangeContext.h>
 #include <messaging/ExchangeDelegate.h>
@@ -233,6 +236,17 @@ private:
     uint32_t mIterationCount = 0;
     uint16_t mSaltLength     = 0;
     uint8_t * mSalt          = nullptr;
+
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC: initiator ships a Kyber-768 pubkey in PBKDFParamRequest, responder answers with the
+    // ciphertext in PBKDFParamResponse. Both messages feed mCommissioningHash, so SPAKE2+ key confirmation
+    // authenticates them. The Kyber secret is used as HKDF salt in DeriveSecureSession.
+    Crypto::KyberKeypair mKyberKeypair;
+    Crypto::KyberPublicKey mKyberRemotePubKey;
+    Crypto::KyberSharedSecret mKyberSharedSecret;
+    bool mKyberRemotePubKeyValid = false;
+    bool mKyberSecretReady       = false;
+#endif
 
     struct Spake2pErrorMsg
     {

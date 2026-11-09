@@ -1,9 +1,11 @@
-// CASE handshake benchmark instrumentation for the accessory (CASE responder)
-// side. Bracket the responder's Sigma1-3 handshake with the same GPIO
-// DONE/BUSY signaling and MEASURE_* serial protocol used by measure-esp's
-// raw-crypto benchmarks, so measure/measure.py and measure-analysis can be
-// reused unchanged. Compiles to an empty translation unit unless
-// CHIP_CASE_BENCHMARK is set (see matter/examples/lighting-app/esp32/CMakeLists.txt).
+// CASE + PASE handshake benchmark instrumentation for the accessory (responder)
+// side. Bracket the responder's handshake (CASE Sigma1-3, PASE PBKDFParamRequest
+// ..Pake3) with the same GPIO DONE/BUSY signaling and MEASURE_* serial protocol
+// used by measure-esp's raw-crypto benchmarks, so measure/measure.py and
+// measure-analysis can be reused unchanged. Each handshake is its own DONE
+// window, tagged algorithm=MATTER_CASE / MATTER_PASE. Compiles to an empty
+// translation unit unless CHIP_CASE_BENCHMARK is set (see
+// matter/examples/lighting-app/esp32/CMakeLists.txt).
 #if CHIP_CASE_BENCHMARK
 
 #include <stdio.h>
@@ -25,7 +27,7 @@
 
 namespace {
 
-int64_t sSigma1StartUs;
+int64_t sStartUs;
 size_t sHeapFreeBefore;
 // Heap-allocated per run: a static array costs ~860 B of .dram0.bss, and the
 // ESP32 lighting-app is within ~30 B of the static DRAM limit.
@@ -37,16 +39,16 @@ bool IsIdleTask(const char * name)
     return strncmp(name, "IDLE", 4) == 0;
 }
 
-} // namespace
-
-extern "C" void MatterCaseBenchmarkOnResponderSigma1Start(void)
+void BenchStart()
 {
     measure_done_busy();
 
+    // A previous handshake that aborted before its end hook leaves this set.
+    free(sTasksBefore);
     // Allocate before the heap snapshot so it cancels out of before/after.
     sTasksBefore = static_cast<TaskStatus_t *>(malloc(sizeof(TaskStatus_t) * CASE_BENCHMARK_MAX_TASKS));
 
-    sSigma1StartUs  = esp_timer_get_time();
+    sStartUs        = esp_timer_get_time();
     sHeapFreeBefore = esp_get_free_heap_size();
 
     sTaskCountBefore = 0;
@@ -57,7 +59,7 @@ extern "C" void MatterCaseBenchmarkOnResponderSigma1Start(void)
     }
 }
 
-extern "C" void MatterCaseBenchmarkOnResponderSessionEstablished(void)
+void BenchEnd(const char * algorithm, const char * parameter, int kyberK)
 {
     int64_t doneUs = esp_timer_get_time();
     measure_done_complete();
@@ -100,22 +102,11 @@ extern "C" void MatterCaseBenchmarkOnResponderSessionEstablished(void)
         busyPct = 100 - (idleRuntimeDelta * 100 / totalRuntimeDelta);
     }
 
-#if CHIP_CRYPTO_PQC_DILITHIUM
-    const char * parameter = "PQC-Kyber768-Dilithium3";
-    int kyberK              = 768;
-#elif CHIP_CRYPTO_PQC
-    const char * parameter = "PQC-Kyber768";
-    int kyberK              = 768;
-#else
-    const char * parameter = "Classical-P256";
-    int kyberK              = 0;
-#endif
-
-    measure_printf("MEASURE_META algorithm=MATTER_CASE parameter=%s k=%d\n", parameter, kyberK);
+    measure_printf("MEASURE_META algorithm=%s parameter=%s k=%d\n", algorithm, parameter, kyberK);
     measure_printf("MEASURE_TIME start_us=%lld end_us=%lld duration_us=%lld\n",
-           (long long) sSigma1StartUs,
+           (long long) sStartUs,
            (long long) doneUs,
-           (long long) (doneUs - sSigma1StartUs));
+           (long long) (doneUs - sStartUs));
     measure_printf("MEASURE_RAM heap_free_before=%lu heap_free_after=%lu heap_used_after=%lu heap_largest_free=%lu heap_min_free=%lu main_stack_free=%lu\n",
            (unsigned long) sHeapFreeBefore,
            (unsigned long) heapFreeAfter,
@@ -124,11 +115,44 @@ extern "C" void MatterCaseBenchmarkOnResponderSessionEstablished(void)
            (unsigned long) heapMinFree,
            (unsigned long) mainStackFree);
     measure_printf("MEASURE_CPU window_us=%lld total_runtime_delta=%lu idle_runtime_delta=%lu busy_pct=%u task_count=%lu\n",
-           (long long) (doneUs - sSigma1StartUs),
+           (long long) (doneUs - sStartUs),
            (unsigned long) totalRuntimeDelta,
            (unsigned long) idleRuntimeDelta,
            busyPct,
            (unsigned long) taskCountAfter);
+}
+
+} // namespace
+
+extern "C" void MatterCaseBenchmarkOnResponderSigma1Start(void)
+{
+    BenchStart();
+}
+
+extern "C" void MatterCaseBenchmarkOnResponderSessionEstablished(void)
+{
+#if CHIP_CRYPTO_PQC_DILITHIUM
+    BenchEnd("MATTER_CASE", "PQC-Kyber768-Dilithium3", 768);
+#elif CHIP_CRYPTO_PQC
+    BenchEnd("MATTER_CASE", "PQC-Kyber768", 768);
+#else
+    BenchEnd("MATTER_CASE", "Classical-P256", 0);
+#endif
+}
+
+extern "C" void MatterPaseBenchmarkOnResponderStart(void)
+{
+    BenchStart();
+}
+
+extern "C" void MatterPaseBenchmarkOnResponderSessionEstablished(void)
+{
+    // PASE has no signatures, so there is no Dilithium variant.
+#if CHIP_CRYPTO_PQC
+    BenchEnd("MATTER_PASE", "PQC-Kyber768", 768);
+#else
+    BenchEnd("MATTER_PASE", "Classical-P256", 0);
+#endif
 }
 
 #endif // CHIP_CASE_BENCHMARK

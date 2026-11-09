@@ -48,6 +48,13 @@
 #include <tracing/macros.h>
 #include <transport/SessionManager.h>
 
+#if CHIP_CASE_BENCHMARK
+// PASE handshake benchmark hooks, implemented by the measurement firmware
+// (see examples/lighting-app/esp32/main/CaseBenchmarkHooks.cpp).
+extern "C" void MatterPaseBenchmarkOnResponderStart(void);
+extern "C" void MatterPaseBenchmarkOnResponderSessionEstablished(void);
+#endif // CHIP_CASE_BENCHMARK
+
 namespace {
 
 enum class PBKDFParamRequestTags : uint8_t
@@ -57,6 +64,10 @@ enum class PBKDFParamRequestTags : uint8_t
     kPasscodeId             = 3,
     kHasPBKDFParameters     = 4,
     kInitiatorSessionParams = 5,
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC extension: Kyber-768 initiator public key (1184 B).
+    kInitiatorKyberPubKey = 100,
+#endif
 };
 
 enum class PBKDFParamResponseTags : uint8_t
@@ -66,6 +77,10 @@ enum class PBKDFParamResponseTags : uint8_t
     kResponderSessionId     = 3,
     kPbkdfParameters        = 4,
     kResponderSessionParams = 5,
+#if CHIP_CRYPTO_PQC
+    // Hybrid PQC extension: Kyber-768 ciphertext encapsulated to the initiator's pubkey (1088 B).
+    kKyberCiphertext = 100,
+#endif
 };
 
 enum class PBKDFParameterSetTags : uint8_t
@@ -153,6 +168,12 @@ void PASESession::Clear()
         chip::Platform::MemoryFree(mSalt);
         mSalt = nullptr;
     }
+#if CHIP_CRYPTO_PQC
+    mKyberKeypair.Clear();
+    ClearSecretData(mKyberSharedSecret.Bytes(), kKyber_SharedSecret_Length);
+    mKyberRemotePubKeyValid = false;
+    mKyberSecretReady       = false;
+#endif
     mPairingComplete = false;
     PairingSession::Clear();
 }
@@ -319,7 +340,17 @@ CHIP_ERROR PASESession::DeriveSecureSession(CryptoContext & session)
     AutoReleaseSymmetricKey<HkdfKeyHandle> hkdfKey(keystore);
 
     ReturnErrorOnFailure(mSpake2p.GetKeys(keystore, hkdfKey.KeyHandle()));
-    ReturnErrorOnFailure(session.InitFromSecret(keystore, hkdfKey.KeyHandle(), ByteSpan{} /* salt */,
+
+    ByteSpan salt{};
+#if CHIP_CRYPTO_PQC
+    if (mKyberSecretReady)
+    {
+        // HKDF-Extract(salt = Kyber secret, IKM = SPAKE2+ Ke) binds the session keys to both exchanges.
+        salt = ByteSpan(mKyberSharedSecret.ConstBytes(), mKyberSharedSecret.Length());
+        ChipLogProgress(SecureChannel, "[PQC] PASE: mixed Kyber-768 shared secret into session-key derivation");
+    }
+#endif
+    ReturnErrorOnFailure(session.InitFromSecret(keystore, hkdfKey.KeyHandle(), salt,
                                                 CryptoContext::SessionInfoType::kSessionEstablishment, mRole));
 
     return CHIP_NO_ERROR;
@@ -355,6 +386,10 @@ CHIP_ERROR PASESession::SendPBKDFParamRequest()
                                                            sizeof(PasscodeId),                  // passcodeId,
                                                            sizeof(uint8_t),                     // hasPBKDFParameters
                                                            SessionParameters::kEstimatedTLVSize // Session Parameters
+#if CHIP_CRYPTO_PQC
+                                                           ,
+                                                           kKyber_PublicKey_Length // initiatorKyberPubKey
+#endif
     );
 
     System::PacketBufferHandle req = System::PacketBufferHandle::New(max_msg_len);
@@ -375,6 +410,17 @@ CHIP_ERROR PASESession::SendPBKDFParamRequest()
 
     ReturnErrorOnFailure(EncodeSessionParameters(AsTlvContextTag(PBKDFParamRequestTags::kInitiatorSessionParams),
                                                  mLocalMRPConfig.Value(), tlvWriter));
+
+#if CHIP_CRYPTO_PQC
+    {
+        ChipLogProgress(SecureChannel, "[PQC] PASE PBKDFParamRequest: sending Kyber-768 initiator pubkey");
+        KyberPublicKey kyberPub;
+        ReturnErrorOnFailure(mKyberKeypair.Initialize());
+        ReturnErrorOnFailure(mKyberKeypair.Pubkey(kyberPub));
+        ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(PBKDFParamRequestTags::kInitiatorKyberPubKey),
+                                                kyberPub.ConstBytes(), static_cast<uint32_t>(kyberPub.Length())));
+    }
+#endif
 
     ReturnErrorOnFailure(tlvWriter.EndContainer(outerContainerType));
     ReturnErrorOnFailure(tlvWriter.Finalize(&req));
@@ -413,6 +459,10 @@ CHIP_ERROR PASESession::HandlePBKDFParamRequest(System::PacketBufferHandle && ms
 
     ChipLogDetail(SecureChannel, "Received PBKDF param request");
 
+#if CHIP_CASE_BENCHMARK
+    MatterPaseBenchmarkOnResponderStart();
+#endif // CHIP_CASE_BENCHMARK
+
     SuccessOrExit(err = mCommissioningHash.AddData(ByteSpan{ msg->Start(), msg->DataLength() }));
 
     tlvReader.Init(std::move(msg));
@@ -437,6 +487,23 @@ CHIP_ERROR PASESession::HandlePBKDFParamRequest(System::PacketBufferHandle && ms
     SuccessOrExit(err = tlvReader.Get(hasPBKDFParameters));
 
     err = ReadSessionParamsIfPresent(AsTlvContextTag(PBKDFParamRequestTags::kInitiatorSessionParams), tlvReader);
+
+#if CHIP_CRYPTO_PQC
+    if (err == CHIP_NO_ERROR && tlvReader.GetTag() == AsTlvContextTag(PBKDFParamRequestTags::kInitiatorKyberPubKey))
+    {
+        ByteSpan kyberPub;
+        SuccessOrExit(err = tlvReader.Get(kyberPub));
+        VerifyOrExit(kyberPub.size() == kKyber_PublicKey_Length, err = CHIP_ERROR_INVALID_TLV_ELEMENT);
+        SuccessOrExit(err = mKyberRemotePubKey.SetBytes(kyberPub.data(), kyberPub.size()));
+        mKyberRemotePubKeyValid = true;
+        ChipLogProgress(SecureChannel, "[PQC] PASE PBKDFParamRequest: peer (initiator) Kyber-768 pubkey received");
+        err = tlvReader.Next();
+    }
+    else
+    {
+        ChipLogProgress(SecureChannel, "[PQC] PASE PBKDFParamRequest: peer sent no Kyber-768 pubkey; classical-only PASE");
+    }
+#endif
 
     // Future-proofing: CHIP_NO_ERROR will be returned by Next() within ReadSessionParamsIfPresent() if we have additional
     // non-parsed TLV Elements, which could happen in the future if additional elements are added to the specification.
@@ -476,6 +543,10 @@ CHIP_ERROR PASESession::SendPBKDFParamResponse(ByteSpan initiatorRandom, bool in
                                     sizeof(uint16_t),                                           // responderSessionId
                                     TLV::EstimateStructOverhead(sizeof(uint32_t), mSaltLength), // pbkdf_parameters
                                     SessionParameters::kEstimatedTLVSize                        // Session Parameters
+#if CHIP_CRYPTO_PQC
+                                    ,
+                                    kKyber_Ciphertext_Length // kyberCiphertext
+#endif
         );
 
     System::PacketBufferHandle resp = System::PacketBufferHandle::New(max_msg_len);
@@ -505,6 +576,19 @@ CHIP_ERROR PASESession::SendPBKDFParamResponse(ByteSpan initiatorRandom, bool in
     VerifyOrReturnError(mLocalMRPConfig.HasValue(), CHIP_ERROR_INCORRECT_STATE);
     ReturnErrorOnFailure(EncodeSessionParameters(AsTlvContextTag(PBKDFParamResponseTags::kResponderSessionParams),
                                                  mLocalMRPConfig.Value(), tlvWriter));
+
+#if CHIP_CRYPTO_PQC
+    if (mKyberRemotePubKeyValid)
+    {
+        ChipLogProgress(SecureChannel, "[PQC] PASE PBKDFParamResponse: encapsulating to initiator's Kyber-768 pubkey");
+        uint8_t kyberCiphertext[kKyber_Ciphertext_Length];
+        ReturnErrorOnFailure(
+            mKyberKeypair.Encapsulate(mKyberRemotePubKey, kyberCiphertext, sizeof(kyberCiphertext), mKyberSharedSecret));
+        mKyberSecretReady = true;
+        ReturnErrorOnFailure(tlvWriter.PutBytes(AsTlvContextTag(PBKDFParamResponseTags::kKyberCiphertext), kyberCiphertext,
+                                                sizeof(kyberCiphertext)));
+    }
+#endif
 
     ReturnErrorOnFailure(tlvWriter.EndContainer(outerContainerType));
     ReturnErrorOnFailure(tlvWriter.Finalize(&resp));
@@ -593,6 +677,22 @@ CHIP_ERROR PASESession::HandlePBKDFParamResponse(System::PacketBufferHandle && m
         // non-parsed TLV Elements, which could happen in the future if additional elements are added to the specification.
         VerifyOrExit(err == CHIP_END_OF_TLV || err == CHIP_NO_ERROR, /* No Action */);
     }
+
+#if CHIP_CRYPTO_PQC
+    if (err == CHIP_NO_ERROR && tlvReader.GetTag() == AsTlvContextTag(PBKDFParamResponseTags::kKyberCiphertext))
+    {
+        ByteSpan kyberCiphertext;
+        SuccessOrExit(err = tlvReader.Get(kyberCiphertext));
+        VerifyOrExit(kyberCiphertext.size() == kKyber_Ciphertext_Length, err = CHIP_ERROR_INVALID_TLV_ELEMENT);
+        ChipLogProgress(SecureChannel, "[PQC] PASE PBKDFParamResponse: decapsulating Kyber-768 ciphertext from responder");
+        SuccessOrExit(err = mKyberKeypair.Decapsulate(kyberCiphertext.data(), kyberCiphertext.size(), mKyberSharedSecret));
+        mKyberSecretReady = true;
+    }
+    else
+    {
+        ChipLogProgress(SecureChannel, "[PQC] PASE PBKDFParamResponse: no Kyber-768 ciphertext from peer; classical-only PASE");
+    }
+#endif
 
     // ExitContainer() acts as a safeguard to ensure that the received encoded message is properly terminated with an EndOfContainer
     // TLV element. It is called as an extra validation step to enforce input data structure integrity. Without it, the message may
@@ -841,6 +941,10 @@ CHIP_ERROR PASESession::HandleMsg3(System::PacketBufferHandle && msg)
     SendStatusReport(mExchangeCtxt, kProtocolCodeSuccess);
 
     Finish();
+
+#if CHIP_CASE_BENCHMARK
+    MatterPaseBenchmarkOnResponderSessionEstablished();
+#endif // CHIP_CASE_BENCHMARK
 exit:
 
     if (err != CHIP_NO_ERROR)
