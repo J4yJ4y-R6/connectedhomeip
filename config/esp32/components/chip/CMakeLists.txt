@@ -77,7 +77,15 @@ chip_gn_arg_append("esp32_cc"              "\"${CMAKE_C_COMPILER}\"")
 chip_gn_arg_append("esp32_cxx"             "\"${CMAKE_CXX_COMPILER}\"")
 chip_gn_arg_append("esp32_cpu"             "\"esp32\"")
 chip_gn_arg_bool("is_debug"                ${is_debug})
-chip_gn_arg_bool("chip_crypto_pqc"         "true")
+if(NOT DEFINED MATTERBENCH_PQC)
+    set(MATTERBENCH_PQC TRUE)
+endif()
+chip_gn_arg_bool("chip_crypto_pqc"         ${MATTERBENCH_PQC})
+
+if(NOT DEFINED MATTERBENCH_CASE_INSTRUMENTATION)
+    set(MATTERBENCH_CASE_INSTRUMENTATION FALSE)
+endif()
+chip_gn_arg_bool("chip_case_benchmark"     ${MATTERBENCH_CASE_INSTRUMENTATION})
 
 # Use PSA Crypto backend for esp-idf v6.0 and onwards
 # esp-idf v6.0 and onwards migrated to mbedTLS 4.x where PSA is the crypto backend primary interface
@@ -371,6 +379,11 @@ set(filter_out "-DHAVE_CONFIG_H" "-DIDF_VER=\\\"${idf_ver}\\\"" )
 # CMake adds config include dir relative to build directory.
 # Make sure full path is given to CHIP build.
 list(APPEND filter_out "-Iconfig")
+
+# These are defined for GN targets via their own `defines`; passing the app-level
+# -D copies too causes "redefined" errors (1 vs true).
+list(APPEND filter_out "-DCHIP_CASE_BENCHMARK=0" "-DCHIP_CASE_BENCHMARK=1"
+                       "-DCHIP_CRYPTO_PQC=0" "-DCHIP_CRYPTO_PQC=1")
 idf_build_get_property(config_dir CONFIG_DIR)
 target_compile_options(${COMPONENT_LIB} PRIVATE "-I${config_dir}")
 

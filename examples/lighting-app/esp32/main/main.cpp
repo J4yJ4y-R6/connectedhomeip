@@ -59,6 +59,10 @@
 #include <platform/ESP32/ESP32SecureCertDACProvider.h>
 #endif
 
+#if CHIP_CASE_BENCHMARK
+#include "measure_trigger.h"
+#endif
+
 #if CONFIG_ESP_INSIGHTS_ENABLED && CONFIG_CHIP_ENABLE_ESP_DIAGNOSTICS
 #include <insights-delegate.h>
 #define START_TIMEOUT_MS 10000
@@ -147,6 +151,11 @@ static void InitServer(intptr_t context)
 
 extern "C" void app_main()
 {
+#if CHIP_CASE_BENCHMARK
+    measure_trigger_init();
+    measure_done_complete(); // force DONE idle at boot; measure_trigger_init() leaves it HIGH/busy
+#endif
+
     // Initialize the ESP NVS layer.
     esp_err_t err = nvs_flash_init();
     if (err != ESP_OK)

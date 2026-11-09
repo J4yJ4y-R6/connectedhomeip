@@ -1,5 +1,11 @@
 import("//build_overrides/chip.gni")
 
+declare_args() {
+  # CASE handshake benchmark hooks in CASESession.cpp. Off by default; enabled
+  # only by the measurement firmware build.
+  chip_case_benchmark = false
+}
+
 import("${chip_root}/src/crypto/crypto.gni")
 
 source_set("check-in-counter") {
@@ -78,6 +84,8 @@ static_library("secure_channel") {
     "UnsolicitedStatusHandler.cpp",
     "UnsolicitedStatusHandler.h",
   ]
+
+  defines = [ "CHIP_CASE_BENCHMARK=${chip_case_benchmark}" ]
 
   cflags = [ "-Wconversion" ]
 

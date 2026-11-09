@@ -70,6 +70,14 @@ endif (CONFIG_ENABLE_PW_RPC)
 idf_component_register(PRIV_INCLUDE_DIRS ${PRIV_INCLUDE_DIRS_LIST}
                        SRC_DIRS ${SRC_DIRS_LIST})
 
+# The CASE benchmark hooks are only referenced from libCHIP.a, which is linked
+# after libmain.a; force ld to pull them out of the archive.
+if(MATTERBENCH_CASE_INSTRUMENTATION)
+    target_link_libraries(${COMPONENT_LIB} INTERFACE
+        "-Wl,--undefined=MatterCaseBenchmarkOnResponderSigma1Start"
+        "-Wl,--undefined=MatterCaseBenchmarkOnResponderSessionEstablished")
+endif()
+
 include(${CHIP_ROOT}/src/app/chip_data_model.cmake)
 chip_configure_data_model(${COMPONENT_LIB}
     ZAP_FILE ${CMAKE_SOURCE_DIR}/data_model/lighting-app.zap

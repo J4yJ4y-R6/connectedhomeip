@@ -50,6 +50,13 @@
 #include <tracing/metric_event.h>
 #include <transport/SessionManager.h>
 
+#if CHIP_CASE_BENCHMARK
+// CASE handshake benchmark hooks, implemented by the measurement firmware
+// (see examples/lighting-app/esp32/main/CaseBenchmarkHooks.cpp).
+extern "C" void MatterCaseBenchmarkOnResponderSigma1Start(void);
+extern "C" void MatterCaseBenchmarkOnResponderSessionEstablished(void);
+#endif // CHIP_CASE_BENCHMARK
+
 namespace {
 // TBEDataTags works for both sigma-2-tbedata and sigma-3-tbedata as they have the same tag numbers for the elements common between
 // them.
@@ -923,6 +930,10 @@ CHIP_ERROR CASESession::EncodeSigma1(System::PacketBufferHandle & msg, EncodeSig
 CHIP_ERROR CASESession::HandleSigma1_and_SendSigma2(System::PacketBufferHandle && msg)
 {
     MATTER_TRACE_SCOPE("HandleSigma1_and_SendSigma2", "CASESession");
+
+#if CHIP_CASE_BENCHMARK
+    MatterCaseBenchmarkOnResponderSigma1Start();
+#endif // CHIP_CASE_BENCHMARK
 
     CHIP_ERROR err = CHIP_NO_ERROR;
 
@@ -2396,6 +2407,10 @@ CHIP_ERROR CASESession::HandleSigma3c(HandleSigma3Data & data, CHIP_ERROR status
 
     mState = State::kFinished;
     Finish();
+
+#if CHIP_CASE_BENCHMARK
+    MatterCaseBenchmarkOnResponderSessionEstablished();
+#endif // CHIP_CASE_BENCHMARK
 
 exit:
     mHandleSigma3Helper.reset();
